@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Same image PHP tests run in locally (see Dockerfile) — pinned to 8.3 to
+      # match production, not composer.json's broader >=7.4 compatibility floor.
+      - name: Build test image
+        run: make build
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Run test suite
+        run: make test
