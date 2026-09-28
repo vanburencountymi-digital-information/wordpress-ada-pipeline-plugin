@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    # Bind-mounted, not COPY'd at build time — unlike a deployed app image, this
+    # container only ever runs `composer`/`phpunit` against whatever's on disk right
+    # now, so a rebuild is never needed just because a source file or test changed.
+    volumes:
+      - .:/app
+    working_dir: /app

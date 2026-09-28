@@ -1,0 +1,14 @@
+# Project planning docs — not part of the shipped plugin
+CLAUDE.md
+PLANNING.md
+
+# Dependencies (committing composer.lock for reproducible installs/CI)
+/vendor/
+
+# PHPUnit
+/.phpunit.result.cache
+/build/
+
+# OS / editor cruft
+.DS_Store
+*.swp
