@@ -39,7 +39,10 @@ class Client
                     'Content-Type' => 'multipart/form-data; boundary=' . $boundary,
                 ],
                 'body' => self::build_multipart_body($boundary, $fields, $filename, $file_contents),
-                'timeout' => 30,
+                // Generous on purpose: this runs on a scheduled WP-Cron hit, not inside
+                // anyone's upload request (see Plugin::maybe_submit_on_upload). This allows
+                // comfortable coverage of cold start on scale to zero services on the API side.
+                'timeout' => 60,
             ]
         );
 

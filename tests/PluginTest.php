@@ -2,7 +2,9 @@
 
 namespace AdaRemediationClient\Tests;
 
+use AdaRemediationClient\Client;
 use AdaRemediationClient\Plugin;
+use Mockery;
 use WP_Mock;
 use WP_Mock\Tools\TestCase;
 
@@ -85,6 +87,7 @@ class PluginTest extends TestCase
         }
 
         WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
+        WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_attachment']);
 
         Plugin::boot();
 
@@ -127,5 +130,43 @@ class PluginTest extends TestCase
         // apply_filters() anyway for a non-PDF attachment, WP_Mock would fail here.
 
         $this->assertFalse(Plugin::should_auto_submit(42));
+    }
+
+    /**
+     * Scheduling (rather than calling Client::submit_attachment() directly) keeps the
+     * pipeline's HTTP round-trip — including a possible API cold start — off of the
+     * upload request itself.
+     */
+    public function test_maybe_submit_on_upload_schedules_submission_for_a_pdf_when_filter_allows_it(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => 'application/pdf',
+        ]);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(true);
+
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])
+            ->with(Mockery::type('integer'), 'ada_remediation_submit_attachment', [42]);
+
+        Plugin::maybe_submit_on_upload(42);
+        $this->assertConditionsMet();
+    }
+
+    public function test_maybe_submit_on_upload_does_not_schedule_when_filter_suppresses_it(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => 'application/pdf',
+        ]);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(false);
+
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Plugin::maybe_submit_on_upload(42);
+        $this->assertConditionsMet();
     }
 }
