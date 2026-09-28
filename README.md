@@ -1,0 +1,1 @@
+# wordpress-ada-pipeline-plugin
