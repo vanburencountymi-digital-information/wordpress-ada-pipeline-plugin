@@ -1,0 +1,32 @@
+{
+    "name": "dicelabs/wordpress-ada-pipeline-plugin",
+    "description": "Submits uploaded PDFs to the ADA remediation pipeline and reports back remediation status.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "authors": [
+        {
+            "name": "Van Buren County Digital Information Department",
+            "homepage": "https://vanburencountymi.gov/departments/departments-offices/digital-information/"
+        }
+    ],
+    "require": {
+        "php": ">=7.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "10up/wp_mock": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "AdaRemediationClient\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "AdaRemediationClient\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    }
+}
