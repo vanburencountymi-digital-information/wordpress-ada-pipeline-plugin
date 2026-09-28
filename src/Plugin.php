@@ -31,6 +31,27 @@ class Plugin
             return;
         }
 
-        // Hook registration lands here as later tickets (DIC-1899+) add behavior.
+        add_action('add_attachment', [self::class, 'maybe_submit_on_upload']);
+    }
+
+    public static function maybe_submit_on_upload(int $attachment_id): void
+    {
+        if (self::should_auto_submit($attachment_id)) {
+            Client::submit_attachment($attachment_id);
+        }
+    }
+
+    /**
+     * PDF attachments only, and only if no adapter has suppressed the default
+     * trigger via the ada_remediation_auto_trigger_on_upload filter (see Layer 2,
+     * which drives submission itself from a richer hook instead).
+     */
+    public static function should_auto_submit(int $attachment_id): bool
+    {
+        if (get_post_mime_type($attachment_id) !== 'application/pdf') {
+            return false;
+        }
+
+        return (bool) apply_filters('ada_remediation_auto_trigger_on_upload', true, $attachment_id);
     }
 }
