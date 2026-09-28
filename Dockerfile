@@ -21,13 +21,14 @@ RUN apk add --no-cache --virtual .build-deps $PHPIZE_DEPS libxml2-dev oniguruma-
 # the upstream install script inside our image.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# uid 1000 matches the default first-user uid on most Linux dev hosts (including this
-# WSL2 setup) — running as this user instead of root means composer install's writes
-# into the bind-mounted vendor/ land back on the host already owned by you, no --user
-# override needed on every `docker compose run` (see dice-document-pipeline-api's
-# Dockerfile for the same reasoning, applied there to its app user).
-RUN addgroup -g 1000 app && adduser -D -u 1000 -G app app
-USER app
-ENV COMPOSER_HOME=/home/app/.composer
+# No baked-in user/uid here on purpose: a fixed uid (e.g. 1000) matches a dev's own
+# host but not CI's runner uid, which broke `composer install` in the bind-mounted
+# /app ("vendor does not exist and could not be created") the first time this ran on
+# GitHub Actions. Instead, the Makefile passes --user "$(id -u):$(id -g)" on every
+# `docker compose run`, so the container always runs as whoever actually invoked
+# `make` — dev or CI — and writes into the bind mount land back correctly owned
+# either way. COMPOSER_HOME is set to a location any uid can write to, since an
+# arbitrary --user has no /etc/passwd entry (and so no HOME) to derive one from.
+ENV COMPOSER_HOME=/tmp/composer-home
 
 WORKDIR /app
