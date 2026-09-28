@@ -3,6 +3,7 @@
 namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Plugin;
+use WP_Mock;
 use WP_Mock\Tools\TestCase;
 
 class PluginTest extends TestCase
@@ -71,5 +72,60 @@ class PluginTest extends TestCase
     public function test_client_namespace_is_loadable_for_adapters(): void
     {
         $this->assertTrue(class_exists('AdaRemediationClient\\Client'));
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_boot_registers_add_attachment_trigger_when_configured(): void
+    {
+        foreach (Plugin::REQUIRED_CONSTANTS as $constant) {
+            define($constant, 'value');
+        }
+
+        WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
+
+        Plugin::boot();
+
+        $this->assertHooksAdded();
+    }
+
+    public function test_should_auto_submit_is_true_for_a_pdf_when_filter_allows_it(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => 'application/pdf',
+        ]);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(true);
+
+        $this->assertTrue(Plugin::should_auto_submit(42));
+    }
+
+    public function test_should_auto_submit_is_false_when_filter_suppresses_it(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => 'application/pdf',
+        ]);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(false);
+
+        $this->assertFalse(Plugin::should_auto_submit(42));
+    }
+
+    public function test_should_auto_submit_is_false_for_non_pdf_attachments_without_consulting_the_filter(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => 'image/jpeg',
+        ]);
+        // No onFilter() expectation set up: if should_auto_submit() called
+        // apply_filters() anyway for a non-PDF attachment, WP_Mock would fail here.
+
+        $this->assertFalse(Plugin::should_auto_submit(42));
     }
 }
