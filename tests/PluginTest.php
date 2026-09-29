@@ -86,8 +86,17 @@ class PluginTest extends TestCase
             define($constant, 'value');
         }
 
+        // Short-circuits Remediation_Log::maybe_install() before its install() branch,
+        // which needs a real ABSPATH/wp-admin/includes/upgrade.php — see RemediationLogTest
+        // for that method's own coverage.
+        WP_Mock::userFunction('get_option', [
+            'args' => ['ada_remediation_log_db_version', ''],
+            'return' => \AdaRemediationClient\Remediation_Log::DB_VERSION,
+        ]);
+
         WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
         WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_attachment']);
+        WP_Mock::expectActionAdded('rest_api_init', [\AdaRemediationClient\Webhook::class, 'register_routes']);
 
         Plugin::boot();
 
