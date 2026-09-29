@@ -33,8 +33,11 @@ class Plugin
             return;
         }
 
+        Remediation_Log::maybe_install();
+
         add_action('add_attachment', [self::class, 'maybe_submit_on_upload']);
         add_action(self::SUBMIT_ATTACHMENT_HOOK, [Client::class, 'submit_attachment']);
+        add_action('rest_api_init', [Webhook::class, 'register_routes']);
     }
 
     /**
