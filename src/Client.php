@@ -39,15 +39,49 @@ class Client
                     'Content-Type' => 'multipart/form-data; boundary=' . $boundary,
                 ],
                 'body' => self::build_multipart_body($boundary, $fields, $filename, $file_contents),
-                'timeout' => 30,
+                // Generous on purpose: this runs on a scheduled WP-Cron hit, not inside
+                // anyone's upload request (see Plugin::maybe_submit_on_upload). This allows
+                // comfortable coverage of cold start on scale to zero services on the API side.
+                'timeout' => 60,
             ]
         );
 
-        if (is_wp_error($response)) {
+        if (is_wp_error($response) || !self::is_success_status(wp_remote_retrieve_response_code($response))) {
             return false;
         }
 
-        return self::is_success_status(wp_remote_retrieve_response_code($response));
+        self::store_submission_result($attachment_id, wp_remote_retrieve_body($response));
+
+        return true;
+    }
+
+    /**
+     * The submit-document response body is the pipeline's RemediationSerializer —
+     * capturing `id` here (as _ada_remediation_id) is the only way an incoming webhook
+     * (DIC-1900), which carries no WordPress-specific identifier at all, can later be
+     * traced back to this attachment.
+     */
+    private static function store_submission_result(int $attachment_id, string $response_body): void
+    {
+        $data = json_decode($response_body, true);
+
+        if (!is_array($data)) {
+            return;
+        }
+
+        if (isset($data['id'])) {
+            update_post_meta($attachment_id, '_ada_remediation_id', $data['id']);
+        }
+
+        if (isset($data['document_id'])) {
+            update_post_meta($attachment_id, '_ada_remediation_content_hash', $data['document_id']);
+        }
+
+        if (isset($data['pipeline_version'])) {
+            update_post_meta($attachment_id, '_ada_remediation_pipeline_version', $data['pipeline_version']);
+        }
+
+        update_post_meta($attachment_id, '_ada_remediation_badge', 'pending');
     }
 
     /**

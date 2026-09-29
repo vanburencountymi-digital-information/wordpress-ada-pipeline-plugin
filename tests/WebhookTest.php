@@ -1,0 +1,261 @@
+<?php
+
+namespace AdaRemediationClient\Tests;
+
+use AdaRemediationClient\Webhook;
+use Mockery;
+use WP_Mock;
+use WP_Mock\Tools\TestCase;
+
+class WebhookTest extends TestCase
+{
+    public function test_register_routes_registers_the_callback_route(): void
+    {
+        WP_Mock::userFunction('register_rest_route', ['times' => 1])
+            ->with(
+                'ada-remediation/v1',
+                '/callback',
+                Mockery::on(function (array $args): bool {
+                    return $args['methods'] === 'POST'
+                        && $args['callback'] instanceof \Closure
+                        && $args['permission_callback'] instanceof \Closure;
+                })
+            );
+
+        Webhook::register_routes();
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_verify_signature_accepts_a_valid_signature(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        $body = '{"remediation_id":"abc"}';
+        $signature = 'sha256=' . hash_hmac('sha256', $body, 'test-secret');
+
+        $this->assertTrue(Webhook::verify_signature($body, $signature));
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_verify_signature_rejects_a_tampered_body(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        $signature = 'sha256=' . hash_hmac('sha256', '{"remediation_id":"abc"}', 'test-secret');
+
+        // Body differs from what the signature was actually computed over.
+        $this->assertFalse(Webhook::verify_signature('{"remediation_id":"tampered"}', $signature));
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_verify_signature_rejects_a_tampered_signature(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        $body = '{"remediation_id":"abc"}';
+
+        $this->assertFalse(Webhook::verify_signature($body, 'sha256=' . str_repeat('0', 64)));
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_verify_signature_rejects_a_missing_header(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+
+        $this->assertFalse(Webhook::verify_signature('{"remediation_id":"abc"}', null));
+    }
+
+    public function test_handle_rejects_malformed_payload(): void
+    {
+        WP_Mock::userFunction('get_posts', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $outcome = Webhook::handle('not json');
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(400, $outcome['status']);
+        $this->assertConditionsMet();
+    }
+
+    public function test_handle_rejects_a_payload_missing_remediation_id(): void
+    {
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $outcome = Webhook::handle('{"status":"compliant"}');
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(400, $outcome['status']);
+    }
+
+    public function test_handle_returns_404_when_no_attachment_matches_the_remediation_id(): void
+    {
+        WP_Mock::userFunction('get_posts', ['return' => []]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $outcome = Webhook::handle('{"remediation_id":"unknown-id","status":"compliant"}');
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(404, $outcome['status']);
+    }
+
+    /**
+     * @dataProvider severityBadgeProvider
+     */
+    public function test_handle_derives_the_correct_badge_when_status_is_noncompliant(array $failed_rules, string $expected_badge): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'noncompliant',
+            'pipeline_version' => '1.2.3',
+            'verification_results' => [
+                ['step' => 'precheck', 'is_compliant' => false, 'failed_rules' => [['severity' => 'critical']]],
+                ['step' => 'postcheck', 'is_compliant' => false, 'failed_rules' => $failed_rules],
+            ],
+        ]);
+
+        $this->expect_badge_write(42, $expected_badge, 'remediation-abc-123');
+        WP_Mock::userFunction('get_posts', [
+            'return' => [42],
+        ])->with(Mockery::on(function (array $query): bool {
+            return $query['meta_key'] === '_ada_remediation_id' && $query['meta_value'] === 'remediation-abc-123';
+        }));
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, Mockery::on(function (array $result) use ($expected_badge): bool {
+                return $result['badge'] === $expected_badge && $result['status'] === 'noncompliant';
+            }));
+
+        $outcome = Webhook::handle($payload);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertSame(['status' => 'ok'], $outcome['body']);
+        $this->assertConditionsMet();
+    }
+
+    public static function severityBadgeProvider(): array
+    {
+        return [
+            'minor -> light-green' => [[['severity' => 'minor']], 'light-green'],
+            'major -> yellow' => [[['severity' => 'major']], 'yellow'],
+            'critical -> red' => [[['severity' => 'critical']], 'red'],
+            'unclassified -> red' => [[['severity' => 'unclassified']], 'red'],
+        ];
+    }
+
+    /**
+     * COMPLIANT covers both postcheck passing and precheck already being compliant
+     * (AlreadyCompliant ends the job before postcheck ever runs) — the pipeline unifies
+     * both into one status (ADR 0024), so no verification_results shape needs checking.
+     */
+    public function test_handle_badges_dark_green_when_status_is_compliant(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+            'verification_results' => [
+                ['step' => 'precheck', 'is_compliant' => true, 'failed_rules' => []],
+            ],
+        ]);
+
+        $this->expect_badge_write(42, 'dark-green', 'remediation-abc-123');
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+                return $result['badge'] === 'dark-green' && $result['status'] === 'compliant';
+            }));
+
+        $outcome = Webhook::handle($payload);
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * ERROR covers a genuine crash and postcheck's own adapter failing (PostCheckUnavailable)
+     * — either way, no verdict exists to derive a real badge from.
+     */
+    public function test_handle_badges_error_when_status_is_error(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'error',
+            'pipeline_version' => '1.2.3',
+            'error' => 'pipeline blew up',
+        ]);
+
+        $this->expect_badge_write(42, 'error', 'remediation-abc-123');
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+                return $result['badge'] === 'error' && $result['status'] === 'error';
+            }));
+
+        $outcome = Webhook::handle($payload);
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * SKIPPED means postcheck was disabled — no verdict either, so it collapses into the
+     * same 'error' badge as ERROR (PLANNING's badge scheme has no separate slot for
+     * "deliberately not checked").
+     */
+    public function test_handle_badges_error_when_status_is_skipped(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'skipped',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        $this->expect_badge_write(42, 'error', 'remediation-abc-123');
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+                return $result['badge'] === 'error' && $result['status'] === 'skipped';
+            }));
+
+        $outcome = Webhook::handle($payload);
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    private function expect_badge_write(int $attachment_id, string $expected_badge, string $remediation_id): void
+    {
+        WP_Mock::userFunction('update_post_meta')
+            ->with($attachment_id, '_ada_remediation_badge', $expected_badge)
+            ->once();
+        WP_Mock::userFunction('update_post_meta')
+            ->with($attachment_id, '_ada_remediation_checked_at', Mockery::type('string'))
+            ->once();
+        WP_Mock::userFunction('current_time', ['return' => '2026-09-28 12:00:00']);
+
+        $wpdb = Mockery::mock('wpdb');
+        $wpdb->prefix = 'wp_';
+        $wpdb->shouldReceive('insert')->once()->with(
+            'wp_ada_remediation_log',
+            Mockery::on(function (array $row) use ($expected_badge, $remediation_id): bool {
+                return $row['badge'] === $expected_badge && $row['remediation_id'] === $remediation_id;
+            }),
+            Mockery::type('array')
+        );
+        $GLOBALS['wpdb'] = $wpdb;
+    }
+}

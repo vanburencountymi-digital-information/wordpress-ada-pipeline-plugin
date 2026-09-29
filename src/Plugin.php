@@ -14,6 +14,8 @@ class Plugin
         'ADA_REMEDIATION_WEBHOOK_SECRET',
     ];
 
+    public const SUBMIT_ATTACHMENT_HOOK = 'ada_remediation_submit_attachment';
+
     public static function is_configured(): bool
     {
         foreach (self::REQUIRED_CONSTANTS as $constant) {
@@ -31,13 +33,23 @@ class Plugin
             return;
         }
 
+        Remediation_Log::maybe_install();
+
         add_action('add_attachment', [self::class, 'maybe_submit_on_upload']);
+        add_action(self::SUBMIT_ATTACHMENT_HOOK, [Client::class, 'submit_attachment']);
+        add_action('rest_api_init', [Webhook::class, 'register_routes']);
     }
 
+    /**
+     * Schedules the actual submission rather than calling Client::submit_attachment()
+     * directly — that's an HTTP round-trip to the pipeline (including a possible cold
+     * start if it's scaled to zero), and add_attachment fires synchronously inside the
+     * person's own upload request. Deferring it means nobody's upload waits on it.
+     */
     public static function maybe_submit_on_upload(int $attachment_id): void
     {
         if (self::should_auto_submit($attachment_id)) {
-            Client::submit_attachment($attachment_id);
+            wp_schedule_single_event(time(), self::SUBMIT_ATTACHMENT_HOOK, [$attachment_id]);
         }
     }
 
