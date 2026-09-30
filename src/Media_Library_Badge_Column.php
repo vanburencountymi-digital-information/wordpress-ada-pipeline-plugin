@@ -11,7 +11,10 @@ class Media_Library_Badge_Column
 {
     public const COLUMN = 'ada_remediation_badge';
 
-    private const BADGE_COLORS = [
+    /**
+     * Public so that adapters can read, extend, and re-use as needed
+     */
+    public const BADGE_COLORS = [
         'queued' => '#b0c4de',
         'pending' => '#4169e1',
         'dark-green' => '#006400',
@@ -21,7 +24,10 @@ class Media_Library_Badge_Column
         'error' => '#616161',
     ];
 
-    private const TOOLTIP_LABELS = [
+    /**
+     * Public so adapters can read, extend, and re-use as needed
+     */
+    public const TOOLTIP_LABELS = [
         'queued' => 'Queued for submission',
         'pending' => 'Remediation in progress',
         'dark-green' => 'Compliant',

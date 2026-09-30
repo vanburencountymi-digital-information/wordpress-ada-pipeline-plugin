@@ -72,6 +72,9 @@ Hover over the dot for the same information as text.
 - `ada_remediation_suppress_file_replacement` (filter, `bool`) — return `true` to stop the plugin's
   own `ADA_REMEDIATION_AUTO_REPLACE_FILE` behavior for a given result, e.g. if you're replacing the
   file yourself in a hook on `ada_remediation_result`.
+- `AdaRemediationClient\Media_Library_Badge_Column::BADGE_COLORS` / `::TOOLTIP_LABELS` — the badge
+  color/label maps from the table above, as PHP arrays keyed by badge state. Public so they can be read directly and repurposed, extended, etc.
+  (e.g. `county-ada-pipeline-adapter`'s Document-edit-screen metabox does this).
 
 ## Testing
 
