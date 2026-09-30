@@ -97,6 +97,8 @@ class PluginTest extends TestCase
         WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
         WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_attachment']);
         WP_Mock::expectActionAdded('rest_api_init', [\AdaRemediationClient\Webhook::class, 'register_routes']);
+        WP_Mock::expectFilterAdded('manage_media_columns', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'register_column']);
+        WP_Mock::expectActionAdded('manage_media_custom_column', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'render_column'], 10, 2);
 
         Plugin::boot();
 
@@ -158,6 +160,8 @@ class PluginTest extends TestCase
 
         WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])
             ->with(Mockery::type('integer'), 'ada_remediation_submit_attachment', [42]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 1])
+            ->with(42, '_ada_remediation_badge', 'queued');
 
         Plugin::maybe_submit_on_upload(42);
         $this->assertConditionsMet();
@@ -174,6 +178,7 @@ class PluginTest extends TestCase
             ->reply(false);
 
         WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
 
         Plugin::maybe_submit_on_upload(42);
         $this->assertConditionsMet();
