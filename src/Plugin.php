@@ -38,6 +38,8 @@ class Plugin
         add_action('add_attachment', [self::class, 'maybe_submit_on_upload']);
         add_action(self::SUBMIT_ATTACHMENT_HOOK, [Client::class, 'submit_attachment']);
         add_action('rest_api_init', [Webhook::class, 'register_routes']);
+        add_filter('manage_media_columns', [Media_Library_Badge_Column::class, 'register_column']);
+        add_action('manage_media_custom_column', [Media_Library_Badge_Column::class, 'render_column'], 10, 2);
     }
 
     /**
@@ -49,6 +51,7 @@ class Plugin
     public static function maybe_submit_on_upload(int $attachment_id): void
     {
         if (self::should_auto_submit($attachment_id)) {
+            update_post_meta($attachment_id, '_ada_remediation_badge', 'queued');
             wp_schedule_single_event(time(), self::SUBMIT_ATTACHMENT_HOOK, [$attachment_id]);
         }
     }
