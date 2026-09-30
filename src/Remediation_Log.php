@@ -10,7 +10,7 @@ namespace AdaRemediationClient;
  */
 class Remediation_Log
 {
-    public const DB_VERSION = '1.0';
+    public const DB_VERSION = '1.1';
 
     public static function table_name(): string
     {
@@ -49,6 +49,7 @@ class Remediation_Log
             badge varchar(20) NOT NULL DEFAULT '',
             precheck_json longtext NULL,
             postcheck_json longtext NULL,
+            warning_message text NULL,
             created_gmt datetime NOT NULL,
             PRIMARY KEY  (id),
             KEY attachment_id (attachment_id),
@@ -82,6 +83,33 @@ class Remediation_Log
                 'created_gmt' => current_time('mysql', true),
             ],
             ['%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
+        );
+    }
+
+    /**
+     * Narrow, free-text logging path for non-fatal issues that aren't a real
+     * verification attempt (e.g. File_Replacer's reachability check) — kept separate
+     * from record() so precheck_json/postcheck_json keep meaning "a verification
+     * step's JSON," not overloaded with warning text.
+     */
+    public static function record_warning(
+        int $attachment_id,
+        string $remediation_id,
+        string $pipeline_version,
+        string $message
+    ): void {
+        global $wpdb;
+
+        $wpdb->insert(
+            self::table_name(),
+            [
+                'attachment_id' => $attachment_id,
+                'remediation_id' => $remediation_id,
+                'pipeline_version' => $pipeline_version,
+                'warning_message' => $message,
+                'created_gmt' => current_time('mysql', true),
+            ],
+            ['%d', '%s', '%s', '%s', '%s']
         );
     }
 }

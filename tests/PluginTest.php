@@ -3,6 +3,7 @@
 namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Client;
+use AdaRemediationClient\File_Replacer;
 use AdaRemediationClient\Plugin;
 use Mockery;
 use WP_Mock;
@@ -99,6 +100,7 @@ class PluginTest extends TestCase
         WP_Mock::expectActionAdded('rest_api_init', [\AdaRemediationClient\Webhook::class, 'register_routes']);
         WP_Mock::expectFilterAdded('manage_media_columns', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'register_column']);
         WP_Mock::expectActionAdded('manage_media_custom_column', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'render_column'], 10, 2);
+        WP_Mock::expectActionAdded('ada_remediation_result', [File_Replacer::class, 'maybe_replace'], File_Replacer::HOOK_PRIORITY, 2);
 
         Plugin::boot();
 

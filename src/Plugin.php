@@ -40,6 +40,7 @@ class Plugin
         add_action('rest_api_init', [Webhook::class, 'register_routes']);
         add_filter('manage_media_columns', [Media_Library_Badge_Column::class, 'register_column']);
         add_action('manage_media_custom_column', [Media_Library_Badge_Column::class, 'render_column'], 10, 2);
+        add_action('ada_remediation_result', [File_Replacer::class, 'maybe_replace'], File_Replacer::HOOK_PRIORITY, 2);
     }
 
     /**
