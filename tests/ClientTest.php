@@ -191,7 +191,7 @@ class ClientTest extends TestCase
             'return' => ['errors' => ['http_request_failed' => ['Could not resolve host']]],
         ]);
         WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
-        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $this->expect_failure_badge_write(42);
 
         $this->assertFalse(Client::submit_attachment(42));
         $this->assertConditionsMet();
@@ -219,8 +219,9 @@ class ClientTest extends TestCase
             'times' => 1,
             'return' => ['response' => ['code' => 401], 'body' => '{"detail":"Invalid token."}'],
         ]);
-        // A rejected submission has no remediation to associate with the attachment.
-        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        // A rejected submission has no remediation_id/content_hash/pipeline_version to store —
+        // only the error badge and a log row (DIC-2004).
+        $this->expect_failure_badge_write(42);
 
         $this->assertFalse(Client::submit_attachment(42));
         $this->assertConditionsMet();
@@ -244,10 +245,40 @@ class ClientTest extends TestCase
             'return' => ['response' => ['code' => 404], 'body' => '<html>Not Found</html>'],
         ]);
         WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
-        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $this->expect_failure_badge_write(42);
 
         $this->assertFalse(Client::submit_attachment(42));
         $this->assertConditionsMet();
+    }
+
+    /**
+     * A failed submission (unreadable file or a rejected pipeline response) has no
+     * remediation_id/content_hash/pipeline_version to store — only the error badge
+     * and a log row with those fields left empty/null (DIC-2004).
+     */
+    private function expect_failure_badge_write(int $attachment_id): void
+    {
+        WP_Mock::userFunction('update_post_meta')
+            ->with($attachment_id, '_ada_remediation_badge', 'error')
+            ->once();
+        WP_Mock::userFunction('current_time', ['return' => '2026-09-28 12:00:00']);
+
+        $wpdb = Mockery::mock('wpdb');
+        $wpdb->prefix = 'wp_';
+        $wpdb->shouldReceive('insert')->once()->with(
+            'wp_ada_remediation_log',
+            Mockery::on(function (array $row) use ($attachment_id): bool {
+                return $row['attachment_id'] === $attachment_id
+                    && $row['remediation_id'] === ''
+                    && $row['content_hash'] === ''
+                    && $row['pipeline_version'] === ''
+                    && $row['badge'] === 'error'
+                    && $row['precheck_json'] === null
+                    && $row['postcheck_json'] === null;
+            }),
+            Mockery::type('array')
+        );
+        $GLOBALS['wpdb'] = $wpdb;
     }
 
     private function define_config_constants(): void
