@@ -17,6 +17,8 @@ class Client
         $file_contents = self::read_attachment_contents($attachment_id);
 
         if ($file_contents === false || $file_contents === null) {
+            self::mark_submission_failed($attachment_id);
+
             return false;
         }
 
@@ -47,12 +49,28 @@ class Client
         );
 
         if (is_wp_error($response) || !self::is_success_status(wp_remote_retrieve_response_code($response))) {
+            self::mark_submission_failed($attachment_id);
+
             return false;
         }
 
         self::store_submission_result($attachment_id, wp_remote_retrieve_body($response));
 
         return true;
+    }
+
+    /**
+     * A failed submission (unreadable file, or the pipeline rejecting the request) used
+     * to leave no trace: no badge, no log row, nothing to show it ever happened. There's
+     * no remediation_id/content_hash/pipeline_version to store at either failure point,
+     * so the log row leaves those empty/null — the table's own column defaults already
+     * support that.
+     */
+    private static function mark_submission_failed(int $attachment_id): void
+    {
+        update_post_meta($attachment_id, '_ada_remediation_badge', 'error');
+
+        Remediation_Log::record($attachment_id, '', '', '', 'error', null, null);
     }
 
     /**
