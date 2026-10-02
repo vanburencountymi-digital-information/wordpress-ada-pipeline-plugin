@@ -75,6 +75,89 @@ class Client {
 	}
 
 	/**
+	 * GETs a pipeline URL (e.g. a webhook payload's download_url), authenticated as this
+	 * site's ServiceAccount — the pipeline's download endpoint rejects anonymous requests.
+	 * The token is only attached when the URL is on the configured pipeline's own origin,
+	 * so a payload can never make this plugin send it to another host.
+	 *
+	 * @param string $url  The pipeline URL to fetch.
+	 * @param array  $args Optional extra wp_remote_get() arguments.
+	 * @return array|\WP_Error
+	 */
+	public static function authenticated_get( string $url, array $args = array() ) {
+		if ( self::is_pipeline_origin( $url ) ) {
+			$args['headers']['Authorization'] = 'Token ' . ADA_REMEDIATION_API_TOKEN;
+		}
+
+		return wp_remote_get( $url, $args );
+	}
+
+	/**
+	 * Downloads a remediated file to a temp file, for adapters that sideload it as a new
+	 * attachment. The caller owns (and must unlink) the returned file.
+	 *
+	 * @param string $url The remediated file's download URL.
+	 * @return string|\WP_Error The temp file path.
+	 */
+	public static function download_remediated_file( string $url ) {
+		if ( ! function_exists( 'wp_tempnam' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+
+		$tmp_file = wp_tempnam( $url );
+
+		if ( ! $tmp_file ) {
+			return new \WP_Error( 'ada_remediation_tempnam_failed', 'Could not create a temporary file.' );
+		}
+
+		$response = self::authenticated_get(
+			$url,
+			array(
+				'stream'   => true,
+				'filename' => $tmp_file,
+				'timeout'  => 60,
+			)
+		);
+
+		if ( is_wp_error( $response ) || ! self::is_success_status( wp_remote_retrieve_response_code( $response ) ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- our own temp file, never an upload.
+			unlink( $tmp_file );
+
+			return is_wp_error( $response )
+				? $response
+				: new \WP_Error( 'ada_remediation_download_failed', 'Download failed with HTTP ' . wp_remote_retrieve_response_code( $response ) . '.' );
+		}
+
+		return $tmp_file;
+	}
+
+	/**
+	 * Whether a URL shares scheme, host and port with ADA_REMEDIATION_API_BASE_URL.
+	 *
+	 * @param string $url The URL to check.
+	 */
+	private static function is_pipeline_origin( string $url ): bool {
+		return self::origin_of( $url ) === self::origin_of( (string) ADA_REMEDIATION_API_BASE_URL );
+	}
+
+	/**
+	 * A URL's scheme://host:port, lowercased ('' if it has none).
+	 *
+	 * @param string $url The URL to reduce.
+	 */
+	private static function origin_of( string $url ): string {
+		$parts = wp_parse_url( $url );
+
+		if ( empty( $parts['scheme'] ) || empty( $parts['host'] ) ) {
+			return '';
+		}
+
+		$port = $parts['port'] ?? ( 'https' === strtolower( $parts['scheme'] ) ? 443 : 80 );
+
+		return strtolower( $parts['scheme'] . '://' . $parts['host'] . ':' . $port );
+	}
+
+	/**
 	 * A failed submission (unreadable file, or the pipeline rejecting the request) used
 	 * to leave no trace: no badge, no log row, nothing to show it ever happened. There's
 	 * no remediation_id/content_hash/pipeline_version to store at either failure point,
