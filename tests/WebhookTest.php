@@ -125,6 +125,11 @@ class WebhookTest extends TestCase
         ]);
 
         $this->expect_badge_write(42, $expected_badge, 'remediation-abc-123');
+        WP_Mock::userFunction('wp_json_encode', [
+            'return' => static function ($data) {
+                return json_encode($data);
+            },
+        ]);
         WP_Mock::userFunction('get_posts', [
             'return' => [42],
         ])->with(Mockery::on(function (array $query): bool {
@@ -171,6 +176,11 @@ class WebhookTest extends TestCase
         ]);
 
         $this->expect_badge_write(42, 'dark-green', 'remediation-abc-123');
+        WP_Mock::userFunction('wp_json_encode', [
+            'return' => static function ($data) {
+                return json_encode($data);
+            },
+        ]);
         WP_Mock::userFunction('get_posts', ['return' => [42]]);
 
         WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
