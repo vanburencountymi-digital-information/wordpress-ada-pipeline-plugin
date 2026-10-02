@@ -143,7 +143,10 @@ class FileReplacerTest extends TestCase
 
         $this->mock_wp_http_helpers();
         WP_Mock::userFunction('wp_remote_get', [
-            'args' => ['https://pipeline.example.org/files/report.pdf'],
+            'args' => [
+                'https://pipeline.example.org/files/report.pdf',
+                ['headers' => ['Authorization' => 'Token test-token']],
+            ],
             'times' => 1,
             'return' => ['response' => ['code' => 200], 'body' => '%PDF-1.4 remediated bytes'],
         ]);
@@ -242,7 +245,10 @@ class FileReplacerTest extends TestCase
 
         $this->mock_wp_http_helpers();
         WP_Mock::userFunction('wp_remote_get', [
-            'args' => ['https://pipeline.example.org/files/report.pdf'],
+            'args' => [
+                'https://pipeline.example.org/files/report.pdf',
+                ['headers' => ['Authorization' => 'Token test-token']],
+            ],
             'return' => ['response' => ['code' => 200], 'body' => '%PDF-1.4 remediated bytes'],
         ]);
 
@@ -378,6 +384,17 @@ class FileReplacerTest extends TestCase
      */
     private function mock_wp_http_helpers(): void
     {
+        // File_Replacer downloads via Client::authenticated_get(), which needs these.
+        if (!defined('ADA_REMEDIATION_API_BASE_URL')) {
+            define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
+            define('ADA_REMEDIATION_API_TOKEN', 'test-token');
+        }
+
+        WP_Mock::userFunction('wp_parse_url', [
+            'return' => static function (string $url) {
+                return parse_url($url);
+            },
+        ]);
         WP_Mock::userFunction('is_wp_error', [
             'return' => static function ($thing): bool {
                 return is_array($thing) && array_key_exists('errors', $thing);

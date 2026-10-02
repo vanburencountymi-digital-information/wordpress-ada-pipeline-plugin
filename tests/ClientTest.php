@@ -321,6 +321,99 @@ class ClientTest extends TestCase
         $this->assertConditionsMet();
     }
 
+    /**
+     * @dataProvider authenticated_get_urls
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authenticated_get_only_sends_the_token_to_the_pipelines_own_origin(string $url, bool $expects_token): void
+    {
+        $this->define_config_constants();
+        WP_Mock::userFunction('wp_parse_url', [
+            'return' => static function (string $url) {
+                return parse_url($url);
+            },
+        ]);
+
+        WP_Mock::userFunction('wp_remote_get', ['times' => 1, 'return' => ['response' => ['code' => 200]]])
+            ->with(
+                $url,
+                Mockery::on(static function (array $args) use ($expects_token): bool {
+                    return $expects_token
+                        ? ($args['headers']['Authorization'] ?? null) === 'Token test-token'
+                        : !isset($args['headers']['Authorization']);
+                })
+            );
+
+        Client::authenticated_get($url);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @return array<string, array{string, bool}>
+     */
+    public static function authenticated_get_urls(): array
+    {
+        return [
+            'same origin' => ['https://pipeline.example.org/api/document-download/abc/', true],
+            'same origin, explicit default port' => ['https://pipeline.example.org:443/x', true],
+            'different host' => ['https://evil.example.com/api/document-download/abc/', false],
+            'different scheme' => ['http://pipeline.example.org/x', false],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_download_remediated_file_returns_the_streamed_temp_file(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('wp_parse_url', ['return' => static function (string $url) {
+            return parse_url($url);
+        }]);
+        WP_Mock::userFunction('wp_tempnam', ['return' => '/tmp/ada-abc.tmp']);
+
+        WP_Mock::userFunction('wp_remote_get', ['times' => 1, 'return' => ['response' => ['code' => 200]]])
+            ->with(
+                'https://pipeline.example.org/api/document-download/abc/',
+                Mockery::on(static function (array $args): bool {
+                    return $args['stream'] === true
+                        && $args['filename'] === '/tmp/ada-abc.tmp'
+                        && $args['headers']['Authorization'] === 'Token test-token';
+                })
+            );
+        WP_Mock::userFunction('AdaRemediationClient\\unlink', ['times' => 0]);
+
+        $this->assertSame(
+            '/tmp/ada-abc.tmp',
+            Client::download_remediated_file('https://pipeline.example.org/api/document-download/abc/')
+        );
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_download_remediated_file_removes_the_temp_file_and_errors_on_a_non_2xx_response(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('wp_parse_url', ['return' => static function (string $url) {
+            return parse_url($url);
+        }]);
+        WP_Mock::userFunction('wp_tempnam', ['return' => '/tmp/ada-abc.tmp']);
+        WP_Mock::userFunction('wp_remote_get', ['return' => ['response' => ['code' => 401]]]);
+        WP_Mock::userFunction('AdaRemediationClient\\unlink', ['times' => 1])->with('/tmp/ada-abc.tmp');
+
+        $result = Client::download_remediated_file('https://pipeline.example.org/api/document-download/abc/');
+
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertConditionsMet();
+    }
+
     private function define_config_constants(): void
     {
         define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
