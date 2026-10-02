@@ -96,7 +96,7 @@ class File_Replacer {
 	 * @return string|false
 	 */
 	private static function download_remote_file( string $url ) {
-		$response = wp_remote_get( $url );
+		$response = Client::authenticated_get( $url );
 
 		if ( is_wp_error( $response ) || ! self::is_success_status( wp_remote_retrieve_response_code( $response ) ) ) {
 			return false;
