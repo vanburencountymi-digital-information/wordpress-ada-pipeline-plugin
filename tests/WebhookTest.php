@@ -237,6 +237,70 @@ class WebhookTest extends TestCase
         $this->assertConditionsMet();
     }
 
+    /**
+     * DIC-2040: register_routes() passes the attachment_id embedded in the signed request's
+     * callback_url as a hint. When it checks out against the payload's own remediation_id,
+     * it's used directly — no need to fall back to searching, which matters once two
+     * attachments can share one remediation_id (content-hash dedup).
+     */
+    public function test_handle_uses_the_attachment_id_hint_when_it_matches_the_payload(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        WP_Mock::userFunction('get_post_meta')
+            ->with(94616, '_ada_remediation_id', true)
+            ->andReturn('remediation-abc-123');
+        WP_Mock::userFunction('get_posts', ['times' => 0]);
+
+        $this->expect_badge_write(94616, 'dark-green', 'remediation-abc-123');
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 94616, Mockery::type('array'));
+
+        $outcome = Webhook::handle($payload, 94616);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * A stale/mismatched hint (e.g. an old callback_url, or two attachments that both once
+     * pointed at this remediation_id before one got superseded) must not be trusted blindly —
+     * falls back to the existing search-by-remediation_id behavior instead.
+     */
+    public function test_handle_falls_back_to_searching_when_the_hint_attachment_does_not_match(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        WP_Mock::userFunction('get_post_meta')
+            ->with(94616, '_ada_remediation_id', true)
+            ->andReturn('some-other-remediation-id');
+        WP_Mock::userFunction('get_posts', ['return' => [94608]])
+            ->with(Mockery::on(function (array $query): bool {
+                return $query['meta_key'] === '_ada_remediation_id' && $query['meta_value'] === 'remediation-abc-123';
+            }));
+
+        $this->expect_badge_write(94608, 'dark-green', 'remediation-abc-123');
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 94608, Mockery::type('array'));
+
+        $outcome = Webhook::handle($payload, 94616);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
     private function expect_badge_write(int $attachment_id, string $expected_badge, string $remediation_id): void
     {
         WP_Mock::userFunction('update_post_meta')

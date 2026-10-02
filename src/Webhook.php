@@ -21,7 +21,7 @@ class Webhook
         register_rest_route(self::ROUTE_NAMESPACE, self::ROUTE, [
             'methods' => 'POST',
             'callback' => static function (\WP_REST_Request $request) {
-                $outcome = self::handle((string) $request->get_body());
+                $outcome = self::handle((string) $request->get_body(), (int) $request->get_param('attachment_id'));
 
                 if (!$outcome['ok']) {
                     return new \WP_Error($outcome['code'], $outcome['message'], ['status' => $outcome['status']]);
@@ -54,9 +54,15 @@ class Webhook
     }
 
     /**
+     * @param int $attachment_id_hint The attachment_id Client::submit_attachment() embedded in
+     *                                this submission's callback_url (DIC-2040). Trusted only
+     *                                after confirming it actually points at this remediation_id
+     *                                — the query string isn't covered by the HMAC signature, so
+     *                                a stale/mismatched hint falls back to the pre-existing
+     *                                search instead of being used blindly.
      * @return array{ok: bool, status?: int, code?: string, message?: string, body?: array}
      */
-    public static function handle(string $raw_body): array
+    public static function handle(string $raw_body, int $attachment_id_hint = 0): array
     {
         $data = json_decode($raw_body, true);
 
@@ -64,7 +70,7 @@ class Webhook
             return self::error_outcome(400, 'ada_remediation_invalid_payload', 'Malformed webhook payload.');
         }
 
-        $attachment_id = self::find_attachment_id((string) $data['remediation_id']);
+        $attachment_id = self::resolve_attachment_id($attachment_id_hint, (string) $data['remediation_id']);
 
         if (!$attachment_id) {
             return self::error_outcome(404, 'ada_remediation_unknown_remediation', 'No attachment found for this remediation_id.');
@@ -101,6 +107,15 @@ class Webhook
     private static function error_outcome(int $status, string $code, string $message): array
     {
         return ['ok' => false, 'status' => $status, 'code' => $code, 'message' => $message];
+    }
+
+    private static function resolve_attachment_id(int $attachment_id_hint, string $remediation_id): int
+    {
+        if ($attachment_id_hint > 0 && get_post_meta($attachment_id_hint, '_ada_remediation_id', true) === $remediation_id) {
+            return $attachment_id_hint;
+        }
+
+        return self::find_attachment_id($remediation_id);
     }
 
     private static function find_attachment_id(string $remediation_id): int
