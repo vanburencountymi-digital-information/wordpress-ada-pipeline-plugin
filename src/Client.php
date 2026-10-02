@@ -26,7 +26,10 @@ class Client
         $boundary = uniqid('ada-remediation-', true);
 
         $fields = [
-            'callback_url' => rest_url('ada-remediation/v1/callback'),
+            // Includes the attachment_id so every submission gets its own callback_url as
+            // the pipeline dedupes (remediation, callback_url) pairs. See Webhook::handle()'s
+            // $attachment_id_hint, which this is read back out as.
+            'callback_url' => add_query_arg('attachment_id', $attachment_id, rest_url('ada-remediation/v1/callback')),
             // Unreachable today — no caller passes $context['force'] yet. Reserved for a
             // future feature that needs to force a re-run past the pipeline's
             // content-hash dedupe.
