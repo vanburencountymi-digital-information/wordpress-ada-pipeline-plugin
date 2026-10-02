@@ -281,6 +281,46 @@ class ClientTest extends TestCase
         $GLOBALS['wpdb'] = $wpdb;
     }
 
+    /**
+     * DIC-2040: a fixed callback_url means the pipeline's own (remediation, callback_url)
+     * idempotency (ADR 0015) silently drops the webhook for a second attachment that happens
+     * to dedupe to the same remediation (identical file content) — its badge gets stuck on
+     * "pending" forever, since no notification ever fires for it. Embedding the attachment_id
+     * gives every submission its own callback_url, regardless of content-hash dedup.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_includes_the_attachment_id_in_the_callback_url(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY],
+        ])->with(
+            Mockery::any(),
+            Mockery::on(function (array $request): bool {
+                return strpos(
+                    $request['body'],
+                    'https://example.org/wp-json/ada-remediation/v1/callback?attachment_id=42'
+                ) !== false;
+            })
+        );
+
+        $this->assertTrue(Client::submit_attachment(42));
+        $this->assertConditionsMet();
+    }
+
     private function define_config_constants(): void
     {
         define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
@@ -299,6 +339,13 @@ class ClientTest extends TestCase
         WP_Mock::userFunction('is_wp_error', [
             'return' => static function ($thing): bool {
                 return is_array($thing) && array_key_exists('errors', $thing);
+            },
+        ]);
+        WP_Mock::userFunction('add_query_arg', [
+            'return' => static function (string $key, $value, string $url): string {
+                $separator = strpos($url, '?') !== false ? '&' : '?';
+
+                return $url . $separator . $key . '=' . $value;
             },
         ]);
         WP_Mock::userFunction('wp_remote_retrieve_response_code', [
