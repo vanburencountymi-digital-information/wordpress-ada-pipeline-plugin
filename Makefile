@@ -1,4 +1,4 @@
-.PHONY: build install test shell
+.PHONY: build install test lint lint-fix shell
 
 # Matches whoever runs `make` (dev or CI) so writes into the bind-mounted /app
 # (vendor/, .phpunit.result.cache) land back owned by that user, not root or a
@@ -14,6 +14,13 @@ install:
 
 test:
 	$(RUN) composer test
+
+# WordPress Coding Standards 
+lint:
+	$(RUN) composer lint
+
+lint-fix:
+	$(RUN) composer lint:fix
 
 shell:
 	$(RUN) sh

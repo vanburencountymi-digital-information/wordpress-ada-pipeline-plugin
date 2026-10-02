@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<ruleset name="wordpress-ada-pipeline-plugin">
+    <description>WordPress.org-compliant coding standards for this plugin (DIC-1877).</description>
+
+    <file>src</file>
+    <file>wordpress-ada-pipeline-plugin.php</file>
+
+    <arg value="sp"/>
+    <arg name="colors"/>
+    <arg name="extensions" value="php"/>
+
+    <config name="minimum_supported_wp_version" value="6.8"/>
+    <config name="testVersion" value="7.4-"/>
+
+    <rule ref="WordPress">
+        <!-- This repo's own established convention (see tests/ for the matching pattern)
+             uses snake_case methods but PascalCase class names under PSR-4 autoloading
+             (AdaRemediationClient\ -> src/), not WP core's file-naming convention
+             (class-foo-bar.php). Changing this would break the PSR-4 autoloader. -->
+        <exclude name="WordPress.Files.FileName"/>
+    </rule>
+
+    <rule ref="WordPress-Extra"/>
+</ruleset>

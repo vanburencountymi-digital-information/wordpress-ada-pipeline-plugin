@@ -28,3 +28,19 @@ jobs:
 
       - name: Run test suite
         run: make test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: make build
+
+      - name: Install dependencies
+        run: make install
+
+      # WordPress Coding Standards (DIC-1877) — required for WordPress.org submission.
+      - name: Run phpcs
+        run: make lint
