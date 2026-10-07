@@ -94,6 +94,9 @@ class Client {
 
 		$args['headers']['Authorization'] = 'Token ' . ADA_REMEDIATION_API_TOKEN;
 
+		// Never follow a redirect: it could lead off the pipeline's origin, carrying the token with it.
+		$args['redirection'] = 0;
+
 		return wp_remote_get( $url, $args );
 	}
 

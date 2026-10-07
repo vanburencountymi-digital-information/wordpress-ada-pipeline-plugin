@@ -359,6 +359,33 @@ class ClientTest extends TestCase
     }
 
     /**
+     * A redirect could lead off the pipeline's origin, and WordPress would send the token along.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authenticated_get_never_follows_redirects_even_if_the_caller_asks_to(): void
+    {
+        $this->define_config_constants();
+        WP_Mock::userFunction('wp_parse_url', [
+            'return' => static function (string $url) {
+                return parse_url($url);
+            },
+        ]);
+
+        WP_Mock::userFunction('wp_remote_get', ['times' => 1, 'return' => ['response' => ['code' => 200]]])
+            ->with(
+                'https://pipeline.example.org/x',
+                Mockery::on(static function (array $args): bool {
+                    return $args['redirection'] === 0;
+                })
+            );
+
+        Client::authenticated_get('https://pipeline.example.org/x', ['redirection' => 5]);
+        $this->assertConditionsMet();
+    }
+
+    /**
      * The URL comes from a webhook payload: a forged or compromised one must not be able to make
      * this site request an internal address (SSRF), or send the token to another host.
      *
