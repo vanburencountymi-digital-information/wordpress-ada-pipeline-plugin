@@ -311,8 +311,82 @@ class WebhookTest extends TestCase
         $this->assertConditionsMet();
     }
 
+    /**
+     * A retry or a replayed signed body must not re-run the result hooks: an adapter's file swap
+     * would create another attachment each time.
+     */
+    public function test_handle_ignores_a_repeat_delivery_of_a_result_it_already_applied(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        WP_Mock::userFunction('get_post_meta')
+            ->with(42, '_ada_remediation_applied_id', true)
+            ->andReturn('remediation-abc-123');
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+
+        $outcome = Webhook::handle($payload);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertSame(['status' => 'ok', 'duplicate' => true], $outcome['body']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * A new job for the same file (a resubmit) has a different remediation_id, so it must still apply.
+     */
+    public function test_handle_still_applies_a_new_job_for_a_file_that_already_had_a_result(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-NEW',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        WP_Mock::userFunction('get_post_meta')
+            ->with(42, '_ada_remediation_applied_id', true)
+            ->andReturn('remediation-OLD');
+        $this->expect_badge_write(42, 'dark-green', 'remediation-NEW');
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1]);
+
+        $outcome = Webhook::handle($payload);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertArrayNotHasKey('duplicate', $outcome['body']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_verify_signature_never_accepts_anything_when_the_secret_is_empty(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', '');
+        $body = '{"remediation_id":"x"}';
+        // What an attacker could compute for themselves against an empty key.
+        $forged = 'sha256=' . hash_hmac('sha256', $body, '');
+
+        $this->assertFalse(Webhook::verify_signature($body, $forged));
+    }
+
     private function expect_badge_write(int $attachment_id, string $expected_badge, string $remediation_id): void
     {
+        // The result hasn't been applied before, and is marked applied once it has.
+        WP_Mock::userFunction('get_post_meta')
+            ->with($attachment_id, '_ada_remediation_applied_id', true)
+            ->andReturn('');
+        WP_Mock::userFunction('update_post_meta')
+            ->with($attachment_id, '_ada_remediation_applied_id', $remediation_id)
+            ->once();
         WP_Mock::userFunction('update_post_meta')
             ->with($attachment_id, '_ada_remediation_badge', $expected_badge)
             ->once();

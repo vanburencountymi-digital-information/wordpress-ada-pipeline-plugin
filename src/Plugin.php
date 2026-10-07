@@ -22,16 +22,72 @@ class Plugin {
 	public const SUBMIT_ATTACHMENT_HOOK = 'ada_remediation_submit_attachment';
 
 	/**
-	 * Whether every required wp-config.php constant is defined.
+	 * The pipeline issues 64-character hex secrets; anything much shorter is a placeholder or a
+	 * typo. An empty HMAC key is worst of all: anyone can compute a valid signature with it.
+	 */
+	public const MIN_WEBHOOK_SECRET_LENGTH = 32;
+
+	/**
+	 * Whether every required wp-config.php constant is defined and usable.
 	 */
 	public static function is_configured(): bool {
+		return array() === self::configuration_problems();
+	}
+
+	/**
+	 * Why the plugin isn't configured, one human-readable line per problem. "Defined" isn't
+	 * enough: an empty webhook secret would make every signature forgeable.
+	 *
+	 * @return string[]
+	 */
+	public static function configuration_problems(): array {
+		$problems = array();
+
 		foreach ( self::REQUIRED_CONSTANTS as $constant ) {
 			if ( ! defined( $constant ) ) {
-				return false;
+				$problems[] = $constant . ' is not defined.';
+				continue;
+			}
+
+			$value = constant( $constant );
+
+			if ( ! is_string( $value ) || '' === trim( $value ) ) {
+				$problems[] = $constant . ' is empty.';
+			} elseif ( 'ADA_REMEDIATION_WEBHOOK_SECRET' === $constant && strlen( $value ) < self::MIN_WEBHOOK_SECRET_LENGTH ) {
+				$problems[] = $constant . ' must be at least ' . self::MIN_WEBHOOK_SECRET_LENGTH . ' characters.';
 			}
 		}
 
-		return true;
+		return $problems;
+	}
+
+	/**
+	 * Tells an administrator why the plugin is switched off, but only when someone has started
+	 * configuring it: a site with none of the constants isn't meant to run this plugin at all.
+	 */
+	public static function render_configuration_notice(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		printf(
+			'<div class="notice notice-error"><p><strong>%s</strong> %s</p></div>',
+			esc_html__( 'ADA remediation is switched off:', 'wordpress-ada-pipeline-plugin' ),
+			esc_html( implode( ' ', self::configuration_problems() ) )
+		);
+	}
+
+	/**
+	 * Whether any required constant has been defined at all.
+	 */
+	private static function is_partly_configured(): bool {
+		foreach ( self::REQUIRED_CONSTANTS as $constant ) {
+			if ( defined( $constant ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -39,6 +95,10 @@ class Plugin {
 	 */
 	public static function boot(): void {
 		if ( ! self::is_configured() ) {
+			if ( self::is_partly_configured() ) {
+				add_action( 'admin_notices', array( self::class, 'render_configuration_notice' ) );
+			}
+
 			return;
 		}
 

@@ -51,11 +51,151 @@ class PluginTest extends TestCase
      */
     public function test_is_configured_returns_true_when_all_constants_are_defined(): void
     {
-        foreach (Plugin::REQUIRED_CONSTANTS as $constant) {
-            define($constant, 'value');
-        }
+        $this->define_valid_constants();
 
         $this->assertTrue(Plugin::is_configured());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     * @dataProvider emptyConstantProvider
+     */
+    public function test_is_configured_returns_false_when_a_constant_is_defined_but_empty(string $empty, $value): void
+    {
+        $this->define_valid_constants($empty);
+        define($empty, $value);
+
+        $this->assertFalse(Plugin::is_configured());
+        $this->assertSame([$empty . ' is empty.'], Plugin::configuration_problems());
+    }
+
+    public static function emptyConstantProvider(): array
+    {
+        return [
+            'empty webhook secret (anyone could sign a payload)' => ['ADA_REMEDIATION_WEBHOOK_SECRET', ''],
+            'whitespace-only webhook secret' => ['ADA_REMEDIATION_WEBHOOK_SECRET', '   '],
+            'empty API token' => ['ADA_REMEDIATION_API_TOKEN', ''],
+            'empty base URL' => ['ADA_REMEDIATION_API_BASE_URL', ''],
+            'non-string secret' => ['ADA_REMEDIATION_WEBHOOK_SECRET', false],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_is_configured_returns_false_for_a_webhook_secret_that_is_too_short(): void
+    {
+        $this->define_valid_constants('ADA_REMEDIATION_WEBHOOK_SECRET');
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'short');
+
+        $this->assertFalse(Plugin::is_configured());
+        $this->assertSame(
+            ['ADA_REMEDIATION_WEBHOOK_SECRET must be at least 32 characters.'],
+            Plugin::configuration_problems()
+        );
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_secret_of_exactly_the_minimum_length_is_accepted(): void
+    {
+        $this->define_valid_constants('ADA_REMEDIATION_WEBHOOK_SECRET');
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', str_repeat('x', Plugin::MIN_WEBHOOK_SECRET_LENGTH));
+
+        $this->assertTrue(Plugin::is_configured());
+        $this->assertSame([], Plugin::configuration_problems());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_configuration_problems_lists_every_missing_constant(): void
+    {
+        $this->assertSame(
+            [
+                'ADA_REMEDIATION_API_BASE_URL is not defined.',
+                'ADA_REMEDIATION_API_TOKEN is not defined.',
+                'ADA_REMEDIATION_WEBHOOK_SECRET is not defined.',
+            ],
+            Plugin::configuration_problems()
+        );
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_boot_tells_admins_why_it_is_off_once_someone_has_started_configuring_it(): void
+    {
+        define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
+
+        WP_Mock::expectActionAdded('admin_notices', [Plugin::class, 'render_configuration_notice']);
+
+        Plugin::boot();
+
+        $this->assertHooksAdded();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_configuration_notice_is_for_administrators_only(): void
+    {
+        WP_Mock::userFunction('current_user_can')->with('manage_options')->andReturn(false);
+
+        ob_start();
+        Plugin::render_configuration_notice();
+
+        $this->assertSame('', ob_get_clean());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_configuration_notice_names_the_problem(): void
+    {
+        $this->define_valid_constants('ADA_REMEDIATION_WEBHOOK_SECRET');
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', '');
+        WP_Mock::userFunction('current_user_can')->with('manage_options')->andReturn(true);
+        WP_Mock::userFunction('esc_html__', ['return' => static function (string $v): string {
+            return $v;
+        }]);
+        WP_Mock::userFunction('esc_html', ['return' => static function (string $v): string {
+            return $v;
+        }]);
+
+        ob_start();
+        Plugin::render_configuration_notice();
+        $html = ob_get_clean();
+
+        $this->assertStringContainsString('notice-error', $html);
+        $this->assertStringContainsString('ADA_REMEDIATION_WEBHOOK_SECRET is empty.', $html);
+    }
+
+    /**
+     * Defines every required constant with a usable value, except the one named (which the test
+     * defines itself).
+     */
+    private function define_valid_constants(string $except = ''): void
+    {
+        $values = [
+            'ADA_REMEDIATION_API_BASE_URL' => 'https://pipeline.example.org',
+            'ADA_REMEDIATION_API_TOKEN' => 'test-token',
+            'ADA_REMEDIATION_WEBHOOK_SECRET' => 'a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4',
+        ];
+
+        foreach ($values as $constant => $value) {
+            if ($constant !== $except) {
+                define($constant, $value);
+            }
+        }
     }
 
     /**
@@ -83,9 +223,7 @@ class PluginTest extends TestCase
      */
     public function test_boot_registers_add_attachment_trigger_when_configured(): void
     {
-        foreach (Plugin::REQUIRED_CONSTANTS as $constant) {
-            define($constant, 'value');
-        }
+        $this->define_valid_constants();
 
         // Short-circuits Remediation_Log::maybe_install() before its install() branch,
         // which needs a real ABSPATH/wp-admin/includes/upgrade.php — see RemediationLogTest
