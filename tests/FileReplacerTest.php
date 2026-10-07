@@ -145,7 +145,7 @@ class FileReplacerTest extends TestCase
         WP_Mock::userFunction('wp_remote_get', [
             'args' => [
                 'https://pipeline.example.org/files/report.pdf',
-                ['headers' => ['Authorization' => 'Token test-token']],
+                ['headers' => ['Authorization' => 'Token test-token'], 'redirection' => 0],
             ],
             'times' => 1,
             'return' => ['response' => ['code' => 200], 'body' => '%PDF-1.4 remediated bytes'],
@@ -247,7 +247,7 @@ class FileReplacerTest extends TestCase
         WP_Mock::userFunction('wp_remote_get', [
             'args' => [
                 'https://pipeline.example.org/files/report.pdf',
-                ['headers' => ['Authorization' => 'Token test-token']],
+                ['headers' => ['Authorization' => 'Token test-token'], 'redirection' => 0],
             ],
             'return' => ['response' => ['code' => 200], 'body' => '%PDF-1.4 remediated bytes'],
         ]);
