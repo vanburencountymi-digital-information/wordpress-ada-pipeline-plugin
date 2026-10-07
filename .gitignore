@@ -12,3 +12,7 @@ PLANNING.md
 # OS / editor cruft
 .DS_Store
 *.swp
+
+#SFTP
+.vscode/
+.vscode/sftp.json
