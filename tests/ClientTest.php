@@ -322,11 +322,11 @@ class ClientTest extends TestCase
     }
 
     /**
-     * @dataProvider authenticated_get_urls
+     * @dataProvider pipeline_urls
      * @runInSeparateProcess
      * @preserveGlobalState disabled
      */
-    public function test_authenticated_get_only_sends_the_token_to_the_pipelines_own_origin(string $url, bool $expects_token): void
+    public function test_authenticated_get_sends_the_token_to_the_pipelines_own_origin(string $url): void
     {
         $this->define_config_constants();
         WP_Mock::userFunction('wp_parse_url', [
@@ -338,10 +338,8 @@ class ClientTest extends TestCase
         WP_Mock::userFunction('wp_remote_get', ['times' => 1, 'return' => ['response' => ['code' => 200]]])
             ->with(
                 $url,
-                Mockery::on(static function (array $args) use ($expects_token): bool {
-                    return $expects_token
-                        ? ($args['headers']['Authorization'] ?? null) === 'Token test-token'
-                        : !isset($args['headers']['Authorization']);
+                Mockery::on(static function (array $args): bool {
+                    return ($args['headers']['Authorization'] ?? null) === 'Token test-token';
                 })
             );
 
@@ -350,16 +348,76 @@ class ClientTest extends TestCase
     }
 
     /**
-     * @return array<string, array{string, bool}>
+     * @return array<string, array{string}>
      */
-    public static function authenticated_get_urls(): array
+    public static function pipeline_urls(): array
     {
         return [
-            'same origin' => ['https://pipeline.example.org/api/document-download/abc/', true],
-            'same origin, explicit default port' => ['https://pipeline.example.org:443/x', true],
-            'different host' => ['https://evil.example.com/api/document-download/abc/', false],
-            'different scheme' => ['http://pipeline.example.org/x', false],
+            'same origin' => ['https://pipeline.example.org/api/document-download/abc/'],
+            'same origin, explicit default port' => ['https://pipeline.example.org:443/x'],
         ];
+    }
+
+    /**
+     * The URL comes from a webhook payload: a forged or compromised one must not be able to make
+     * this site request an internal address (SSRF), or send the token to another host.
+     *
+     * @dataProvider foreign_urls
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authenticated_get_refuses_any_url_outside_the_pipelines_origin_without_making_a_request(string $url): void
+    {
+        $this->define_config_constants();
+        WP_Mock::userFunction('wp_parse_url', [
+            'return' => static function (string $url) {
+                return parse_url($url);
+            },
+        ]);
+        WP_Mock::userFunction('wp_remote_get', ['times' => 0]);
+
+        $result = Client::authenticated_get($url);
+
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function foreign_urls(): array
+    {
+        return [
+            'different host' => ['https://evil.example.com/api/document-download/abc/'],
+            'different scheme' => ['http://pipeline.example.org/x'],
+            'different port' => ['https://pipeline.example.org:8443/x'],
+            'cloud metadata service' => ['http://169.254.169.254/latest/meta-data/'],
+            'loopback' => ['http://127.0.0.1:8080/admin'],
+            'no scheme or host' => ['/etc/passwd'],
+            'userinfo trick' => ['https://pipeline.example.org@evil.example.com/x'],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_download_remediated_file_refuses_a_foreign_url_before_creating_a_temp_file(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('wp_parse_url', [
+            'return' => static function (string $url) {
+                return parse_url($url);
+            },
+        ]);
+        WP_Mock::userFunction('wp_remote_get', ['times' => 0]);
+        WP_Mock::userFunction('wp_tempnam', ['times' => 0]);
+
+        $result = Client::download_remediated_file('http://169.254.169.254/latest/meta-data/');
+
+        $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertConditionsMet();
     }
 
     /**

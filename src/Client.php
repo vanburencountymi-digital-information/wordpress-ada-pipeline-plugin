@@ -77,17 +77,22 @@ class Client {
 	/**
 	 * GETs a pipeline URL (e.g. a webhook payload's download_url), authenticated as this
 	 * site's ServiceAccount — the pipeline's download endpoint rejects anonymous requests.
-	 * The token is only attached when the URL is on the configured pipeline's own origin,
-	 * so a payload can never make this plugin send it to another host.
+	 *
+	 * Refuses any URL that isn't on the configured pipeline's own origin. The URL comes from a
+	 * webhook payload, and a forged or compromised one must not be able to make this site
+	 * request an internal address (SSRF) or hand the token to another host. Everything this
+	 * plugin and its adapters fetch with it is a pipeline URL anyway.
 	 *
 	 * @param string $url  The pipeline URL to fetch.
 	 * @param array  $args Optional extra wp_remote_get() arguments.
 	 * @return array|\WP_Error
 	 */
 	public static function authenticated_get( string $url, array $args = array() ) {
-		if ( self::is_pipeline_origin( $url ) ) {
-			$args['headers']['Authorization'] = 'Token ' . ADA_REMEDIATION_API_TOKEN;
+		if ( ! self::is_pipeline_origin( $url ) ) {
+			return new \WP_Error( 'ada_remediation_foreign_url', 'Refusing to fetch a URL that is not on the remediation pipeline.' );
 		}
+
+		$args['headers']['Authorization'] = 'Token ' . ADA_REMEDIATION_API_TOKEN;
 
 		return wp_remote_get( $url, $args );
 	}
@@ -100,6 +105,12 @@ class Client {
 	 * @return string|\WP_Error The temp file path.
 	 */
 	public static function download_remediated_file( string $url ) {
+		// Checked before touching the filesystem, so a refused URL leaves no temp file behind.
+		// authenticated_get() enforces the same rule, but only after the temp file exists.
+		if ( ! self::is_pipeline_origin( $url ) ) {
+			return new \WP_Error( 'ada_remediation_foreign_url', 'Refusing to download from a URL that is not on the remediation pipeline.' );
+		}
+
 		if ( ! function_exists( 'wp_tempnam' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/file.php';
 		}

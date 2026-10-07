@@ -56,6 +56,12 @@ class Webhook {
 	public static function verify_signature( string $raw_body, ?string $signature_header ): bool {
 		$signature_header = (string) $signature_header;
 
+		// Belt and braces: Plugin::is_configured() already refuses an empty secret, but an empty
+		// HMAC key must never be able to validate anything.
+		if ( '' === (string) ADA_REMEDIATION_WEBHOOK_SECRET ) {
+			return false;
+		}
+
 		if ( strncmp( $signature_header, self::SIGNATURE_PREFIX, strlen( self::SIGNATURE_PREFIX ) ) !== 0 ) {
 			return false;
 		}
@@ -91,6 +97,18 @@ class Webhook {
 			return self::error_outcome( 404, 'ada_remediation_unknown_remediation', 'No attachment found for this remediation_id.' );
 		}
 
+		// A repeated delivery (a retry, or a replayed signed body) must not re-run the result
+		// hooks: an adapter's file swap would otherwise create another attachment every time.
+		if ( get_post_meta( $attachment_id, '_ada_remediation_applied_id', true ) === (string) $data['remediation_id'] ) {
+			return array(
+				'ok'   => true,
+				'body' => array(
+					'status'    => 'ok',
+					'duplicate' => true,
+				),
+			);
+		}
+
 		$badge = self::derive_badge( $data );
 
 		update_post_meta( $attachment_id, '_ada_remediation_badge', $badge );
@@ -113,6 +131,9 @@ class Webhook {
 			'verification_results' => $data['verification_results'] ?? array(),
 			'download_url'         => $data['download_url'] ?? null,
 		);
+
+		// Marked before the hooks run, so the side effects happen at most once per job.
+		update_post_meta( $attachment_id, '_ada_remediation_applied_id', (string) $data['remediation_id'] );
 
 		do_action( 'ada_remediation_result', $attachment_id, $result );
 
