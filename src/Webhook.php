@@ -91,9 +91,21 @@ class Webhook {
 			return self::error_outcome( 400, 'ada_remediation_invalid_payload', 'Malformed webhook payload.' );
 		}
 
-		$attachment_id = self::resolve_attachment_id( $attachment_id_hint, (string) $data['remediation_id'] );
+		$attachment_id = self::resolve_attachment_id(
+			$attachment_id_hint,
+			(string) $data['remediation_id'],
+			isset( $data['document_id'] ) ? (string) $data['document_id'] : null
+		);
 
 		if ( ! $attachment_id ) {
+			// Otherwise only Sentry would know this result was dropped.
+			Remediation_Log::record_warning(
+				$attachment_id_hint,
+				(string) $data['remediation_id'],
+				(string) ( $data['pipeline_version'] ?? '' ),
+				'Webhook result could not be matched to an attachment and was not applied.'
+			);
+
 			return self::error_outcome( 404, 'ada_remediation_unknown_remediation', 'No attachment found for this remediation_id.' );
 		}
 
@@ -162,15 +174,61 @@ class Webhook {
 	/**
 	 * Resolves which attachment a webhook result belongs to.
 	 *
-	 * @param int    $attachment_id_hint See handle()'s own docblock.
-	 * @param string $remediation_id     The payload's remediation_id.
+	 * @param int         $attachment_id_hint See handle()'s own docblock.
+	 * @param string      $remediation_id     The payload's remediation_id.
+	 * @param string|null $content_hash       The payload's document_id, stored if the hint is salvaged.
 	 */
-	private static function resolve_attachment_id( int $attachment_id_hint, string $remediation_id ): int {
-		if ( $attachment_id_hint > 0 && get_post_meta( $attachment_id_hint, '_ada_remediation_id', true ) === $remediation_id ) {
-			return $attachment_id_hint;
+	private static function resolve_attachment_id( int $attachment_id_hint, string $remediation_id, ?string $content_hash = null ): int {
+		if ( $attachment_id_hint > 0 ) {
+			$stored_id = get_post_meta( $attachment_id_hint, '_ada_remediation_id', true );
+
+			if ( $stored_id === $remediation_id ) {
+				return $attachment_id_hint;
+			}
+
+			if ( self::is_failed_submission( $attachment_id_hint, $stored_id ) ) {
+				self::adopt_remediation( $attachment_id_hint, $remediation_id, $content_hash );
+
+				return $attachment_id_hint;
+			}
 		}
 
 		return self::find_attachment_id( $remediation_id );
+	}
+
+	/**
+	 * Whether a hinted attachment is one whose submit response was lost (DIC-2184): it exists,
+	 * never stored a remediation_id, and Client::mark_submission_failed() gave it the error
+	 * badge. A hint carrying a *different* id is a newer/older job and is never salvaged, so an
+	 * older result can't overwrite a newer one.
+	 *
+	 * Caveat: the attachment_id query arg isn't covered by the HMAC signature, so a replayed
+	 * signed payload could attach its result to another file in this failed state. Low risk
+	 * (needs a captured valid payload) and limited to files already marked failed.
+	 *
+	 * @param int   $attachment_id The hinted attachment.
+	 * @param mixed $stored_id     Its stored _ada_remediation_id meta value.
+	 */
+	private static function is_failed_submission( int $attachment_id, $stored_id ): bool {
+		return '' === $stored_id
+			&& 'attachment' === get_post_type( $attachment_id )
+			&& 'error' === get_post_meta( $attachment_id, '_ada_remediation_badge', true );
+	}
+
+	/**
+	 * Stores the ids Client::store_submission_result() would have, so normal result handling
+	 * and "Fetch Most Recent Remediation Report" work afterwards.
+	 *
+	 * @param int         $attachment_id  The attachment adopting this job.
+	 * @param string      $remediation_id The payload's remediation_id.
+	 * @param string|null $content_hash   The payload's document_id, if any.
+	 */
+	private static function adopt_remediation( int $attachment_id, string $remediation_id, ?string $content_hash ): void {
+		update_post_meta( $attachment_id, '_ada_remediation_id', $remediation_id );
+
+		if ( null !== $content_hash && '' !== $content_hash ) {
+			update_post_meta( $attachment_id, '_ada_remediation_content_hash', $content_hash );
+		}
 	}
 
 	/**

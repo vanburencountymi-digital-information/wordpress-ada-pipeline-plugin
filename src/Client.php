@@ -59,7 +59,7 @@ class Client {
 				// Generous on purpose: this runs on a scheduled WP-Cron hit, not inside
 				// anyone's upload request (see Plugin::maybe_submit_on_upload). This allows
 				// comfortable coverage of cold start on scale to zero services on the API side.
-				'timeout' => 60,
+				'timeout' => 120,
 			)
 		);
 

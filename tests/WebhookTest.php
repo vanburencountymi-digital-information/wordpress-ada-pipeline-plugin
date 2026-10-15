@@ -101,11 +101,82 @@ class WebhookTest extends TestCase
     {
         WP_Mock::userFunction('get_posts', ['return' => []]);
         WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $this->expect_warning_row(0, 'unknown-id');
 
         $outcome = Webhook::handle('{"remediation_id":"unknown-id","status":"compliant"}');
 
         $this->assertFalse($outcome['ok']);
         $this->assertSame(404, $outcome['status']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * DIC-2184: the submit response was lost, so the hinted attachment has the error badge and no
+     * stored id. The pipeline's result is still applied, and the ids are stored.
+     */
+    public function test_handle_salvages_a_result_for_a_hint_whose_submit_response_was_lost(): void
+    {
+        $payload = json_encode([
+            'remediation_id' => 'remediation-abc-123',
+            'document_id' => 'deadbeef',
+            'status' => 'compliant',
+            'pipeline_version' => '1.2.3',
+        ]);
+
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_id', true)->andReturn('');
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_badge', true)->andReturn('error');
+        WP_Mock::userFunction('get_post_type')->with(13364)->andReturn('attachment');
+        WP_Mock::userFunction('get_posts', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta')
+            ->with(13364, '_ada_remediation_id', 'remediation-abc-123')->once();
+        WP_Mock::userFunction('update_post_meta')
+            ->with(13364, '_ada_remediation_content_hash', 'deadbeef')->once();
+        $this->expect_badge_write(13364, 'dark-green', 'remediation-abc-123');
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 13364, Mockery::type('array'));
+
+        $outcome = Webhook::handle($payload, 13364);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * An id-less hint is only salvaged when it is a failed submission: a non-error badge means
+     * the file is in some other state and must not be taken over.
+     */
+    public function test_handle_does_not_salvage_a_hint_without_the_error_badge(): void
+    {
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_id', true)->andReturn('');
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_badge', true)->andReturn('queued');
+        WP_Mock::userFunction('get_post_type')->with(13364)->andReturn('attachment');
+        WP_Mock::userFunction('get_posts', ['return' => []]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $this->expect_warning_row(13364, 'remediation-abc-123');
+
+        $outcome = Webhook::handle('{"remediation_id":"remediation-abc-123","status":"compliant"}', 13364);
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(404, $outcome['status']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * A hint pointing at a different job's id is never salvaged: an older result must not
+     * overwrite a newer one.
+     */
+    public function test_handle_does_not_salvage_a_hint_with_a_different_stored_id(): void
+    {
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_id', true)->andReturn('newer-job');
+        WP_Mock::userFunction('get_posts', ['return' => []]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $this->expect_warning_row(13364, 'older-job');
+
+        $outcome = Webhook::handle('{"remediation_id":"older-job","status":"compliant"}', 13364);
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(404, $outcome['status']);
+        $this->assertConditionsMet();
     }
 
     /**
@@ -376,6 +447,24 @@ class WebhookTest extends TestCase
         $forged = 'sha256=' . hash_hmac('sha256', $body, '');
 
         $this->assertFalse(Webhook::verify_signature($body, $forged));
+    }
+
+    private function expect_warning_row(int $attachment_id, string $remediation_id): void
+    {
+        WP_Mock::userFunction('current_time', ['return' => '2026-09-28 12:00:00']);
+
+        $wpdb = Mockery::mock('wpdb');
+        $wpdb->prefix = 'wp_';
+        $wpdb->shouldReceive('insert')->once()->with(
+            'wp_ada_remediation_log',
+            Mockery::on(function (array $row) use ($attachment_id, $remediation_id): bool {
+                return $row['attachment_id'] === $attachment_id
+                    && $row['remediation_id'] === $remediation_id
+                    && '' !== $row['warning_message'];
+            }),
+            Mockery::type('array')
+        );
+        $GLOBALS['wpdb'] = $wpdb;
     }
 
     private function expect_badge_write(int $attachment_id, string $expected_badge, string $remediation_id): void
