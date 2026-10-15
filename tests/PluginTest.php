@@ -245,6 +245,48 @@ class PluginTest extends TestCase
         $this->assertHooksAdded();
     }
 
+    /**
+     * @dataProvider mime_types
+     */
+    public function test_is_pdf_trusts_the_recorded_mime_type(?string $mime, bool $expected): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', [
+            'args' => [42],
+            'return' => $mime,
+        ]);
+
+        $this->assertSame($expected, Plugin::is_pdf(42));
+    }
+
+    public function mime_types(): array
+    {
+        return [
+            'pdf'       => ['application/pdf', true],
+            'image'     => ['image/jpeg', false],
+            'empty'     => ['', false],
+            'not found' => [null, false],
+        ];
+    }
+
+    /**
+     * @dataProvider non_positive_ids
+     */
+    public function test_is_pdf_is_false_for_a_non_positive_id_without_looking_it_up(int $attachment_id): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['times' => 0]);
+
+        $this->assertFalse(Plugin::is_pdf($attachment_id));
+        $this->assertConditionsMet();
+    }
+
+    public function non_positive_ids(): array
+    {
+        return [
+            'zero'     => [0],
+            'negative' => [-1],
+        ];
+    }
+
     public function test_should_auto_submit_is_true_for_a_pdf_when_filter_allows_it(): void
     {
         WP_Mock::userFunction('get_post_mime_type', [

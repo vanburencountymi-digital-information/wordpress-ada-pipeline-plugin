@@ -21,6 +21,8 @@ class Plugin {
 
 	public const SUBMIT_ATTACHMENT_HOOK = 'ada_remediation_submit_attachment';
 
+	public const PDF_MIME_TYPE = 'application/pdf';
+
 	/**
 	 * The pipeline issues 64-character hex secrets; anything much shorter is a placeholder or a
 	 * typo. An empty HMAC key is worst of all: anyone can compute a valid signature with it.
@@ -130,6 +132,18 @@ class Plugin {
 	}
 
 	/**
+	 * Whether WordPress recorded the attachment as a PDF. Trusts the stored mime type;
+	 * the pipeline checks the file's actual contents. Public so adapters share one
+	 * definition of "a PDF" instead of keeping their own.
+	 *
+	 * @param int $attachment_id The attachment to check; 0 or less is never a PDF.
+	 * @return bool
+	 */
+	public static function is_pdf( int $attachment_id ): bool {
+		return $attachment_id > 0 && get_post_mime_type( $attachment_id ) === self::PDF_MIME_TYPE;
+	}
+
+	/**
 	 * PDF attachments only, and only if no adapter has suppressed the default
 	 * trigger via the ada_remediation_auto_trigger_on_upload filter (see Layer 2,
 	 * which drives submission itself from a richer hook instead).
@@ -137,7 +151,7 @@ class Plugin {
 	 * @param int $attachment_id The attachment to check.
 	 */
 	public static function should_auto_submit( int $attachment_id ): bool {
-		if ( get_post_mime_type( $attachment_id ) !== 'application/pdf' ) {
+		if ( ! self::is_pdf( $attachment_id ) ) {
 			return false;
 		}
 

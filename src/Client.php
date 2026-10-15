@@ -15,13 +15,18 @@ namespace AdaRemediationClient;
  */
 class Client {
 
+	/**
+	 * $context key: true re-runs past the pipeline's content-hash dedupe.
+	 */
+	public const CONTEXT_FORCE = 'force';
+
 	private const SUBMIT_PATH = '/api/submit-document/';
 
 	/**
 	 * Submits an attachment's PDF to the remediation pipeline.
 	 *
 	 * @param int   $attachment_id The attachment to submit.
-	 * @param array $context       Optional. 'force' => true bypasses the pipeline's
+	 * @param array $context       Optional. self::CONTEXT_FORCE => true bypasses the pipeline's
 	 *                             content-hash dedupe.
 	 */
 	public static function submit_attachment( int $attachment_id, array $context = array() ): bool {
@@ -43,7 +48,7 @@ class Client {
 			// $attachment_id_hint, which this is read back out as.
 			'callback_url' => add_query_arg( 'attachment_id', $attachment_id, rest_url( 'ada-remediation/v1/callback' ) ),
 			// Re-run past the pipeline's content-hash dedupe.
-			'force'        => ! empty( $context['force'] ) ? 'true' : 'false',
+			'force'        => ! empty( $context[ self::CONTEXT_FORCE ] ) ? 'true' : 'false',
 		);
 
 		$response = wp_remote_post(
@@ -269,7 +274,7 @@ class Client {
 
 		$body .= "--{$boundary}\r\n";
 		$body .= "Content-Disposition: form-data; name=\"file\"; filename=\"{$filename}\"\r\n";
-		$body .= "Content-Type: application/pdf\r\n\r\n";
+		$body .= 'Content-Type: ' . Plugin::PDF_MIME_TYPE . "\r\n\r\n";
 		$body .= $file_contents . "\r\n";
 		$body .= "--{$boundary}--\r\n";
 
