@@ -322,6 +322,45 @@ class ClientTest extends TestCase
     }
 
     /**
+     * @dataProvider force_contexts
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_sends_force_from_the_context(array $context, string $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', ['return' => 'https://example.org/wp-json/ada-remediation/v1/callback']);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY],
+        ])->with(
+            Mockery::any(),
+            Mockery::on(function (array $request) use ($expected): bool {
+                return strpos($request['body'], "name=\"force\"\r\n\r\n{$expected}\r\n") !== false;
+            })
+        );
+
+        $this->assertTrue(Client::submit_attachment(42, $context));
+        $this->assertConditionsMet();
+    }
+
+    public function force_contexts(): array
+    {
+        return [
+            'no context'   => [[], 'false'],
+            'force true'   => [['force' => true], 'true'],
+            'force false'  => [['force' => false], 'false'],
+        ];
+    }
+
+    /**
      * @dataProvider pipeline_urls
      * @runInSeparateProcess
      * @preserveGlobalState disabled

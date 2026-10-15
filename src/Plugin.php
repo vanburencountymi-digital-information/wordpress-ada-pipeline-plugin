@@ -105,7 +105,9 @@ class Plugin {
 		Remediation_Log::maybe_install();
 
 		add_action( 'add_attachment', array( self::class, 'maybe_submit_on_upload' ) );
-		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_attachment' ) );
+		// Two arguments so a scheduled event can carry [ $attachment_id, [ 'force' => true ] ]
+		// through to Client::submit_attachment()'s $context. Events scheduled with just the ID still work.
+		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_attachment' ), 10, 2 );
 		add_action( 'rest_api_init', array( Webhook::class, 'register_routes' ) );
 		add_filter( 'manage_media_columns', array( Media_Library_Badge_Column::class, 'register_column' ) );
 		add_action( 'manage_media_custom_column', array( Media_Library_Badge_Column::class, 'render_column' ), 10, 2 );
