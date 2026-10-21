@@ -20,26 +20,26 @@ class Media_Library_Badge_Column {
 	 * Public so that adapters can read, extend, and re-use as needed
 	 */
 	public const BADGE_COLORS = array(
-		'queued'      => '#b0c4de',
-		'pending'     => '#4169e1',
-		'dark-green'  => '#006400',
-		'light-green' => '#90ee90',
-		'yellow'      => '#ffc107',
-		'red'         => '#dc3545',
-		'error'       => '#616161',
+		Submission_State_Service::BADGE_QUEUED      => '#b0c4de',
+		Submission_State_Service::BADGE_PENDING     => '#4169e1',
+		Submission_State_Service::BADGE_DARK_GREEN  => '#006400',
+		Submission_State_Service::BADGE_LIGHT_GREEN => '#90ee90',
+		Submission_State_Service::BADGE_YELLOW      => '#ffc107',
+		Submission_State_Service::BADGE_RED         => '#dc3545',
+		Submission_State_Service::BADGE_ERROR       => '#616161',
 	);
 
 	/**
-	 * Public so adapters can read, extend, and re-use as needed
+	 * Public so that adapters can read, extend, and re-use as needed
 	 */
 	public const TOOLTIP_LABELS = array(
-		'queued'      => 'Queued for submission',
-		'pending'     => 'Remediation in progress',
-		'dark-green'  => 'Compliant',
-		'light-green' => 'Remediation completed with minor issues',
-		'yellow'      => 'Remediation completed with major issues',
-		'red'         => 'Remediation completed with critical or unclassified issues',
-		'error'       => 'No remediation result available',
+		Submission_State_Service::BADGE_QUEUED      => 'Queued for submission',
+		Submission_State_Service::BADGE_PENDING     => 'Remediation in progress',
+		Submission_State_Service::BADGE_DARK_GREEN  => 'Compliant',
+		Submission_State_Service::BADGE_LIGHT_GREEN => 'Remediation completed with minor issues',
+		Submission_State_Service::BADGE_YELLOW      => 'Remediation completed with major issues',
+		Submission_State_Service::BADGE_RED         => 'Remediation completed with critical or unclassified issues',
+		Submission_State_Service::BADGE_ERROR       => 'No remediation result available',
 	);
 
 	/**
@@ -64,7 +64,7 @@ class Media_Library_Badge_Column {
 			return;
 		}
 
-		$badge = get_post_meta( $attachment_id, '_ada_remediation_badge', true );
+		$badge = Submission_State_Service::current_badge( $attachment_id );
 
 		if ( ! $badge ) {
 			return;
@@ -72,8 +72,8 @@ class Media_Library_Badge_Column {
 
 		printf(
 			'<span class="ada-remediation-badge" style="display:inline-block;width:12px;height:12px;border-radius:50%%;background:%s;" title="%s"></span>',
-			esc_attr( self::BADGE_COLORS[ $badge ] ?? self::BADGE_COLORS['error'] ),
-			esc_attr( self::TOOLTIP_LABELS[ $badge ] ?? self::TOOLTIP_LABELS['error'] )
+			esc_attr( self::BADGE_COLORS[ $badge ] ?? self::BADGE_COLORS[ Submission_State_Service::BADGE_ERROR ] ),
+			esc_attr( self::TOOLTIP_LABELS[ $badge ] ?? self::TOOLTIP_LABELS[ Submission_State_Service::BADGE_ERROR ] )
 		);
 	}
 }

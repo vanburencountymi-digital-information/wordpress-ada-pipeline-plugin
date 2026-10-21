@@ -21,6 +21,17 @@ class Webhook {
 	public const SIGNATURE_HEADER = 'X-Webhook-Signature';
 	public const SIGNATURE_PREFIX = 'sha256=';
 
+	private const STEP_PRECHECK  = 'precheck';
+	private const STEP_POSTCHECK = 'postcheck';
+
+	private const STATUS_COMPLIANT    = 'compliant';
+	private const STATUS_NONCOMPLIANT = 'noncompliant';
+
+	private const SEVERITY_CRITICAL     = 'critical';
+	private const SEVERITY_MAJOR        = 'major';
+	private const SEVERITY_MINOR        = 'minor';
+	private const SEVERITY_UNCLASSIFIED = 'unclassified';
+
 	/**
 	 * Registers the callback REST route.
 	 */
@@ -111,7 +122,7 @@ class Webhook {
 
 		// A repeated delivery (a retry, or a replayed signed body) must not re-run the result
 		// hooks: an adapter's file swap would otherwise create another attachment every time.
-		if ( get_post_meta( $attachment_id, '_ada_remediation_applied_id', true ) === (string) $data['remediation_id'] ) {
+		if ( Submission_State_Service::applied_remediation_id( $attachment_id ) === (string) $data['remediation_id'] ) {
 			return array(
 				'ok'   => true,
 				'body' => array(
@@ -123,8 +134,8 @@ class Webhook {
 
 		$badge = self::derive_badge( $data );
 
-		update_post_meta( $attachment_id, '_ada_remediation_badge', $badge );
-		update_post_meta( $attachment_id, '_ada_remediation_checked_at', current_time( 'mysql', true ) );
+		Submission_State_Service::mark_result( $attachment_id, $badge );
+		Submission_State_Service::mark_checked( $attachment_id, current_time( 'mysql', true ) );
 
 		Remediation_Log::record(
 			$attachment_id,
@@ -132,8 +143,8 @@ class Webhook {
 			(string) ( $data['document_id'] ?? '' ),
 			(string) ( $data['pipeline_version'] ?? '' ),
 			$badge,
-			self::step_json( $data, 'precheck' ),
-			self::step_json( $data, 'postcheck' )
+			self::step_json( $data, self::STEP_PRECHECK ),
+			self::step_json( $data, self::STEP_POSTCHECK )
 		);
 
 		$result = array(
@@ -145,7 +156,7 @@ class Webhook {
 		);
 
 		// Marked before the hooks run, so the side effects happen at most once per job.
-		update_post_meta( $attachment_id, '_ada_remediation_applied_id', (string) $data['remediation_id'] );
+		Submission_State_Service::mark_applied( $attachment_id, (string) $data['remediation_id'] );
 
 		do_action( 'ada_remediation_result', $attachment_id, $result );
 
@@ -174,82 +185,39 @@ class Webhook {
 	/**
 	 * Resolves which attachment a webhook result belongs to.
 	 *
+	 * A file that already carries the remediation_id always wins over the hint: the hint isn't
+	 * covered by the HMAC, so a replayed signed body with some other file's id in it must land on
+	 * the file that already has this job (and be skipped as a duplicate), never be salvaged onto
+	 * a second one.
+	 *
 	 * @param int         $attachment_id_hint See handle()'s own docblock.
 	 * @param string      $remediation_id     The payload's remediation_id.
 	 * @param string|null $content_hash       The payload's document_id, stored if the hint is salvaged.
+	 * @return int The attachment id the result belongs to, or 0 if none matches.
 	 */
 	private static function resolve_attachment_id( int $attachment_id_hint, string $remediation_id, ?string $content_hash = null ): int {
-		if ( $attachment_id_hint > 0 ) {
-			$stored_id = get_post_meta( $attachment_id_hint, '_ada_remediation_id', true );
-
-			if ( $stored_id === $remediation_id ) {
-				return $attachment_id_hint;
-			}
-
-			if ( self::is_failed_submission( $attachment_id_hint, $stored_id ) ) {
-				self::adopt_remediation( $attachment_id_hint, $remediation_id, $content_hash );
-
-				return $attachment_id_hint;
-			}
+		if ( $attachment_id_hint > 0 && Submission_State_Service::remediation_id( $attachment_id_hint ) === $remediation_id ) {
+			return $attachment_id_hint;
 		}
 
-		return self::find_attachment_id( $remediation_id );
-	}
+		$existing = Submission_State_Service::find_attachment_id( $remediation_id );
 
-	/**
-	 * Whether a hinted attachment is one whose submit response was lost (DIC-2184): it exists,
-	 * never stored a remediation_id, and Client::mark_submission_failed() gave it the error
-	 * badge. A hint carrying a *different* id is a newer/older job and is never salvaged, so an
-	 * older result can't overwrite a newer one.
-	 *
-	 * Caveat: the attachment_id query arg isn't covered by the HMAC signature, so a replayed
-	 * signed payload could attach its result to another file in this failed state. Low risk
-	 * (needs a captured valid payload) and limited to files already marked failed.
-	 *
-	 * @param int   $attachment_id The hinted attachment.
-	 * @param mixed $stored_id     Its stored _ada_remediation_id meta value.
-	 */
-	private static function is_failed_submission( int $attachment_id, $stored_id ): bool {
-		return '' === $stored_id
-			&& 'attachment' === get_post_type( $attachment_id )
-			&& 'error' === get_post_meta( $attachment_id, '_ada_remediation_badge', true );
-	}
-
-	/**
-	 * Stores the ids Client::store_submission_result() would have, so normal result handling
-	 * and "Fetch Most Recent Remediation Report" work afterwards.
-	 *
-	 * @param int         $attachment_id  The attachment adopting this job.
-	 * @param string      $remediation_id The payload's remediation_id.
-	 * @param string|null $content_hash   The payload's document_id, if any.
-	 */
-	private static function adopt_remediation( int $attachment_id, string $remediation_id, ?string $content_hash ): void {
-		update_post_meta( $attachment_id, '_ada_remediation_id', $remediation_id );
-
-		if ( null !== $content_hash && '' !== $content_hash ) {
-			update_post_meta( $attachment_id, '_ada_remediation_content_hash', $content_hash );
+		if ( $existing > 0 ) {
+			return $existing;
 		}
-	}
 
-	/**
-	 * Finds the attachment carrying a given remediation_id, if any.
-	 *
-	 * @param string $remediation_id The remediation_id to search for.
-	 */
-	private static function find_attachment_id( string $remediation_id ): int {
-		// phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value -- this postmeta has no dedicated table/index; get_posts() is the only lookup this plugin does against it.
-		$posts = get_posts(
-			array(
-				'post_type'      => 'attachment',
-				'posts_per_page' => 1,
-				'fields'         => 'ids',
-				'meta_key'       => '_ada_remediation_id',
-				'meta_value'     => $remediation_id,
-			)
-		);
-		// phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+		// Nobody has this job. A hinted file whose submit response was lost (DIC-2184) may adopt it.
+		// A hint carrying a *different* id is a newer/older job and is never salvaged, so an older
+		// result can't overwrite a newer one. The hint isn't signed, so this is limited to files
+		// already marked failed; with the lookup above, a replayed body can't reach a second file.
+		if ( $attachment_id_hint > 0 && Submission_State_Service::is_failed_submission( $attachment_id_hint ) ) {
+			// So normal result handling and "Fetch Most Recent Remediation Report" work afterwards.
+			Submission_State_Service::record_submission( $attachment_id_hint, $remediation_id, $content_hash );
 
-		return isset( $posts[0] ) ? (int) $posts[0] : 0;
+			return $attachment_id_hint;
+		}
+
+		return 0;
 	}
 
 	/**
@@ -267,17 +235,17 @@ class Webhook {
 	private static function derive_badge( array $data ): string {
 		$status = $data['status'] ?? '';
 
-		if ( 'noncompliant' === $status ) {
-			$postcheck = self::find_step( $data, 'postcheck' );
+		if ( self::STATUS_NONCOMPLIANT === $status ) {
+			$postcheck = self::find_step( $data, self::STEP_POSTCHECK );
 
 			return self::badge_for_severity( self::worst_severity( $postcheck['failed_rules'] ?? array() ) );
 		}
 
-		if ( 'compliant' === $status ) {
-			return 'dark-green';
+		if ( self::STATUS_COMPLIANT === $status ) {
+			return Submission_State_Service::BADGE_DARK_GREEN;
 		}
 
-		return 'error';
+		return Submission_State_Service::BADGE_ERROR;
 	}
 
 	/**
@@ -288,7 +256,7 @@ class Webhook {
 	private static function worst_severity( array $failed_rules ): ?string {
 		$present = array_column( $failed_rules, 'severity' );
 
-		foreach ( array( 'critical', 'major', 'minor', 'unclassified' ) as $severity ) {
+		foreach ( array( self::SEVERITY_CRITICAL, self::SEVERITY_MAJOR, self::SEVERITY_MINOR, self::SEVERITY_UNCLASSIFIED ) as $severity ) {
 			if ( in_array( $severity, $present, true ) ) {
 				return $severity;
 			}
@@ -304,15 +272,15 @@ class Webhook {
 	 */
 	private static function badge_for_severity( ?string $severity ): string {
 		switch ( $severity ) {
-			case 'minor':
-				return 'light-green';
-			case 'major':
-				return 'yellow';
-			case 'critical':
-			case 'unclassified':
-				return 'red';
+			case self::SEVERITY_MINOR:
+				return Submission_State_Service::BADGE_LIGHT_GREEN;
+			case self::SEVERITY_MAJOR:
+				return Submission_State_Service::BADGE_YELLOW;
+			case self::SEVERITY_CRITICAL:
+			case self::SEVERITY_UNCLASSIFIED:
+				return Submission_State_Service::BADGE_RED;
 			default:
-				return 'dark-green';
+				return Submission_State_Service::BADGE_DARK_GREEN;
 		}
 	}
 

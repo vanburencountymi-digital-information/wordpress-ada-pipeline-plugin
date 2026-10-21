@@ -340,12 +340,112 @@ class PluginTest extends TestCase
             ->with(true, 42)
             ->reply(true);
 
-        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])
+        WP_Mock::userFunction('get_post_meta', ['return' => '']);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => true])
             ->with(Mockery::type('integer'), 'ada_remediation_submit_attachment', [42]);
         WP_Mock::userFunction('update_post_meta', ['times' => 1])
             ->with(42, '_ada_remediation_badge', 'queued');
+        WP_Mock::userFunction('update_post_meta', ['times' => 1])
+            ->with(42, '_ada_remediation_submitted_at', Mockery::type('integer'));
 
         Plugin::maybe_submit_on_upload(42);
+        $this->assertConditionsMet();
+    }
+
+    public function test_maybe_submit_on_upload_marks_the_file_failed_when_scheduling_fails(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(true);
+        WP_Mock::userFunction('get_post_meta', ['return' => '']);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => false]);
+        WP_Mock::userFunction('wp_next_scheduled', ['return' => false]);
+        WP_Mock::userFunction('current_time', ['return' => '2026-10-21 12:00:00']);
+
+        $badges = [];
+        WP_Mock::userFunction('update_post_meta', [
+            'return' => static function ($id, $key, $value) use (&$badges): bool {
+                if ('_ada_remediation_badge' === $key) {
+                    $badges[] = $value;
+                }
+
+                return true;
+            },
+        ]);
+
+        $wpdb = Mockery::mock('wpdb');
+        $wpdb->prefix = 'wp_';
+        $wpdb->shouldReceive('insert')->once()->with(
+            'wp_ada_remediation_log',
+            Mockery::on(static function (array $row): bool {
+                return 42 === $row['attachment_id'] && 'error' === $row['badge'];
+            }),
+            Mockery::type('array')
+        );
+        $GLOBALS['wpdb'] = $wpdb;
+
+        Plugin::maybe_submit_on_upload(42);
+        unset($GLOBALS['wpdb']);
+
+        $this->assertSame(['queued', 'error'], $badges);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * WP-Cron returns false for an identical event already scheduled; that event will run, so the
+     * file is not failed.
+     */
+    public function test_maybe_submit_on_upload_keeps_the_file_queued_when_an_identical_event_is_already_scheduled(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(true);
+        WP_Mock::userFunction('get_post_meta', ['return' => '']);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => false]);
+        WP_Mock::userFunction('wp_next_scheduled', ['times' => 1, 'return' => 1700000000])
+            ->with('ada_remediation_submit_attachment', [42]);
+
+        $badges = [];
+        WP_Mock::userFunction('update_post_meta', [
+            'return' => static function ($id, $key, $value) use (&$badges): bool {
+                if ('_ada_remediation_badge' === $key) {
+                    $badges[] = $value;
+                }
+
+                return true;
+            },
+        ]);
+
+        Plugin::maybe_submit_on_upload(42);
+
+        $this->assertSame(['queued'], $badges);
+        $this->assertConditionsMet();
+    }
+
+    public function test_maybe_submit_on_upload_does_not_schedule_when_a_pending_job_blocks_queueing(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::onFilter('ada_remediation_auto_trigger_on_upload')
+            ->with(true, 42)
+            ->reply(true);
+        $recent = time() - 5;
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use ($recent) {
+                return [
+                    '_ada_remediation_badge' => 'pending',
+                    '_ada_remediation_submitted_at' => $recent,
+                ][$key] ?? '';
+            },
+        ]);
+        $previous = ini_set('error_log', '/dev/null');
+
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        Plugin::maybe_submit_on_upload(42);
+        ini_set('error_log', (string) $previous);
         $this->assertConditionsMet();
     }
 

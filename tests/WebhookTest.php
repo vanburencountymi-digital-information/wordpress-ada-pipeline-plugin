@@ -126,7 +126,7 @@ class WebhookTest extends TestCase
         WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_id', true)->andReturn('');
         WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_badge', true)->andReturn('error');
         WP_Mock::userFunction('get_post_type')->with(13364)->andReturn('attachment');
-        WP_Mock::userFunction('get_posts', ['times' => 0]);
+        WP_Mock::userFunction('get_posts', ['return' => []]);
         WP_Mock::userFunction('update_post_meta')
             ->with(13364, '_ada_remediation_id', 'remediation-abc-123')->once();
         WP_Mock::userFunction('update_post_meta')
@@ -138,6 +138,27 @@ class WebhookTest extends TestCase
         $outcome = Webhook::handle($payload, 13364);
 
         $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * The hint isn't signed. A replayed body whose job is already on file A, sent with the hint of
+     * a failed file B, must land on A (and be skipped as a duplicate), never be salvaged onto B.
+     */
+    public function test_handle_routes_a_replay_to_the_file_that_already_has_the_job_not_the_hinted_one(): void
+    {
+        $payload = '{"remediation_id":"remediation-abc-123","status":"compliant"}';
+
+        WP_Mock::userFunction('get_post_meta')->with(13364, '_ada_remediation_id', true)->andReturn('');
+        WP_Mock::userFunction('get_post_meta')->with(42, '_ada_remediation_applied_id', true)->andReturn('remediation-abc-123');
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+
+        $outcome = Webhook::handle($payload, 13364);
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertTrue($outcome['body']['duplicate']);
         $this->assertConditionsMet();
     }
 

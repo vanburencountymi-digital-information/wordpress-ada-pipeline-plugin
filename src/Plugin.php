@@ -107,8 +107,8 @@ class Plugin {
 		Remediation_Log::maybe_install();
 
 		add_action( 'add_attachment', array( self::class, 'maybe_submit_on_upload' ) );
-		// Two arguments so a scheduled event can carry [ $attachment_id, [ 'force' => true ] ]
-		// through to Client::submit_attachment()'s $context. Events scheduled with just the ID still work.
+		// WP-Cron passes event args positionally, so accepting two is what lets a force context
+		// reach submit_attachment(); events scheduled with only the ID still work (default context).
 		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_attachment' ), 10, 2 );
 		add_action( 'rest_api_init', array( Webhook::class, 'register_routes' ) );
 		add_filter( 'manage_media_columns', array( Media_Library_Badge_Column::class, 'register_column' ) );
@@ -125,9 +125,14 @@ class Plugin {
 	 * @param int $attachment_id The newly uploaded attachment's post ID.
 	 */
 	public static function maybe_submit_on_upload( int $attachment_id ): void {
-		if ( self::should_auto_submit( $attachment_id ) ) {
-			update_post_meta( $attachment_id, '_ada_remediation_badge', 'queued' );
-			wp_schedule_single_event( time(), self::SUBMIT_ATTACHMENT_HOOK, array( $attachment_id ) );
+		if ( self::should_auto_submit( $attachment_id ) && Submission_State_Service::mark_queued( $attachment_id ) ) {
+			// A file left queued with no event would look in flight for a while and then never be sent.
+			// WP-Cron also returns false when an identical event is already scheduled; that one will run.
+			$args = array( $attachment_id );
+
+			if ( ! wp_schedule_single_event( time(), self::SUBMIT_ATTACHMENT_HOOK, $args ) && ! wp_next_scheduled( self::SUBMIT_ATTACHMENT_HOOK, $args ) ) {
+				Client::mark_submission_failed( $attachment_id );
+			}
 		}
 	}
 
@@ -137,7 +142,7 @@ class Plugin {
 	 * definition of "a PDF" instead of keeping their own.
 	 *
 	 * @param int $attachment_id The attachment to check; 0 or less is never a PDF.
-	 * @return bool
+	 * @return bool True if the stored mime type is application/pdf.
 	 */
 	public static function is_pdf( int $attachment_id ): bool {
 		return $attachment_id > 0 && get_post_mime_type( $attachment_id ) === self::PDF_MIME_TYPE;
@@ -149,6 +154,7 @@ class Plugin {
 	 * which drives submission itself from a richer hook instead).
 	 *
 	 * @param int $attachment_id The attachment to check.
+	 * @return bool True if a PDF upload should be queued for submission.
 	 */
 	public static function should_auto_submit( int $attachment_id ): bool {
 		if ( ! self::is_pdf( $attachment_id ) ) {
