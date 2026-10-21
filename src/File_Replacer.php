@@ -158,7 +158,7 @@ class File_Replacer {
 	private static function log_warning( int $attachment_id, array $result, string $message ): void {
 		Remediation_Log::record_warning(
 			$attachment_id,
-			(string) get_post_meta( $attachment_id, '_ada_remediation_id', true ),
+			Submission_State_Service::remediation_id( $attachment_id ),
 			(string) ( $result['pipeline_version'] ?? '' ),
 			$message
 		);

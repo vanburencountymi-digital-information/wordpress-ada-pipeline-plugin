@@ -90,6 +90,7 @@ class MediaLibraryBadgeColumnTest extends TestCase
             'yellow (major)' => ['yellow', '#ffc107', 'Remediation completed with major issues'],
             'red (critical/unclassified)' => ['red', '#dc3545', 'Remediation completed with critical or unclassified issues'],
             'error (error/skipped)' => ['error', '#616161', 'No remediation result available'],
+            'unknown value falls back to error' => ['something-new', '#616161', 'No remediation result available'],
         ];
     }
 }

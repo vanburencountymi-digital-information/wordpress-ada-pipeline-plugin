@@ -15,16 +15,50 @@ namespace AdaRemediationClient;
  */
 class Client {
 
+	/**
+	 * $context key: true re-runs past the pipeline's content-hash dedupe.
+	 */
+	public const CONTEXT_FORCE = 'force';
+
 	private const SUBMIT_PATH = '/api/submit-document/';
+
+	/**
+	 * Generous on purpose: submits run on a scheduled WP-Cron hit, not inside anyone's
+	 * upload request, and this covers a cold start of the scale-to-zero API. Submission_State_Service's
+	 * claim must outlast it.
+	 */
+	private const SUBMIT_TIMEOUT_SECONDS = 120;
 
 	/**
 	 * Submits an attachment's PDF to the remediation pipeline.
 	 *
 	 * @param int   $attachment_id The attachment to submit.
-	 * @param array $context       Optional. 'force' => true bypasses the pipeline's
-	 *                             content-hash dedupe.
+	 * @param array $context       Optional. self::CONTEXT_FORCE => true bypasses the pipeline's
+	 *                             content-hash dedupe. It does not bypass the in-flight check.
+	 * @return bool False if the attachment is not a PDF, a submission is already in flight
+	 *              (nothing is changed for either), or the submission failed.
 	 */
 	public static function submit_attachment( int $attachment_id, array $context = array() ): bool {
+		if ( ! Plugin::is_pdf( $attachment_id ) ) {
+			return false;
+		}
+
+		return Submission_State_Service::run_exclusive(
+			$attachment_id,
+			static function () use ( $attachment_id, $context ): bool {
+				return self::send( $attachment_id, $context );
+			}
+		);
+	}
+
+	/**
+	 * Reads the file and posts it to the pipeline. Callers hold the claim.
+	 *
+	 * @param int   $attachment_id The attachment to submit.
+	 * @param array $context       See submit_attachment().
+	 * @return bool Whether the pipeline accepted the submission.
+	 */
+	private static function send( int $attachment_id, array $context ): bool {
 		$file_contents = self::read_attachment_contents( $attachment_id );
 
 		if ( false === $file_contents || null === $file_contents ) {
@@ -42,10 +76,7 @@ class Client {
 			// the pipeline dedupes (remediation, callback_url) pairs. See Webhook::handle()'s
 			// $attachment_id_hint, which this is read back out as.
 			'callback_url' => add_query_arg( 'attachment_id', $attachment_id, rest_url( 'ada-remediation/v1/callback' ) ),
-			// Unreachable today — no caller passes $context['force'] yet. Reserved for a
-			// future feature that needs to force a re-run past the pipeline's
-			// content-hash dedupe.
-			'force'        => ! empty( $context['force'] ) ? 'true' : 'false',
+			'force'        => ! empty( $context[ self::CONTEXT_FORCE ] ) ? 'true' : 'false',
 		);
 
 		$response = wp_remote_post(
@@ -56,10 +87,7 @@ class Client {
 					'Content-Type'  => 'multipart/form-data; boundary=' . $boundary,
 				),
 				'body'    => self::build_multipart_body( $boundary, $fields, $filename, $file_contents ),
-				// Generous on purpose: this runs on a scheduled WP-Cron hit, not inside
-				// anyone's upload request (see Plugin::maybe_submit_on_upload). This allows
-				// comfortable coverage of cold start on scale to zero services on the API side.
-				'timeout' => 120,
+				'timeout' => self::SUBMIT_TIMEOUT_SECONDS,
 			)
 		);
 
@@ -69,7 +97,11 @@ class Client {
 			return false;
 		}
 
-		self::store_submission_result( $attachment_id, wp_remote_retrieve_body( $response ) );
+		if ( ! self::store_submission_result( $attachment_id, wp_remote_retrieve_body( $response ) ) ) {
+			self::mark_submission_failed( $attachment_id );
+
+			return false;
+		}
 
 		return true;
 	}
@@ -180,10 +212,10 @@ class Client {
 	 *
 	 * @param int $attachment_id The attachment whose submission failed.
 	 */
-	private static function mark_submission_failed( int $attachment_id ): void {
-		update_post_meta( $attachment_id, '_ada_remediation_badge', 'error' );
+	public static function mark_submission_failed( int $attachment_id ): void {
+		Submission_State_Service::mark_error( $attachment_id );
 
-		Remediation_Log::record( $attachment_id, '', '', '', 'error', null, null );
+		Remediation_Log::record( $attachment_id, '', '', '', Submission_State_Service::BADGE_ERROR, null, null );
 	}
 
 	/**
@@ -194,27 +226,25 @@ class Client {
 	 *
 	 * @param int    $attachment_id The attachment that was just submitted.
 	 * @param string $response_body The submit-document endpoint's raw JSON response body.
+	 * @return bool False if the body carries no remediation id. Nothing is stored then: a file
+	 *              marked pending with no id could never match a webhook, and the pending
+	 *              badge would block every retry until it went stale.
 	 */
-	private static function store_submission_result( int $attachment_id, string $response_body ): void {
+	private static function store_submission_result( int $attachment_id, string $response_body ): bool {
 		$data = json_decode( $response_body, true );
 
-		if ( ! is_array( $data ) ) {
-			return;
+		if ( ! is_array( $data ) || ! isset( $data['id'] ) ) {
+			return false;
 		}
 
-		if ( isset( $data['id'] ) ) {
-			update_post_meta( $attachment_id, '_ada_remediation_id', $data['id'] );
-		}
+		Submission_State_Service::mark_submitted(
+			$attachment_id,
+			(string) $data['id'],
+			isset( $data['document_id'] ) ? (string) $data['document_id'] : null,
+			isset( $data['pipeline_version'] ) ? (string) $data['pipeline_version'] : null
+		);
 
-		if ( isset( $data['document_id'] ) ) {
-			update_post_meta( $attachment_id, '_ada_remediation_content_hash', $data['document_id'] );
-		}
-
-		if ( isset( $data['pipeline_version'] ) ) {
-			update_post_meta( $attachment_id, '_ada_remediation_pipeline_version', $data['pipeline_version'] );
-		}
-
-		update_post_meta( $attachment_id, '_ada_remediation_badge', 'pending' );
+		return true;
 	}
 
 	/**
@@ -263,6 +293,9 @@ class Client {
 	private static function build_multipart_body( string $boundary, array $fields, string $filename, string $file_contents ): string {
 		$body = '';
 
+		// The name goes inside a quoted header value, so a quote or line break would end it early.
+		$filename = str_replace( array( '"', "\r", "\n" ), '', $filename );
+
 		foreach ( $fields as $name => $value ) {
 			$body .= "--{$boundary}\r\n";
 			$body .= "Content-Disposition: form-data; name=\"{$name}\"\r\n\r\n";
@@ -271,7 +304,7 @@ class Client {
 
 		$body .= "--{$boundary}\r\n";
 		$body .= "Content-Disposition: form-data; name=\"file\"; filename=\"{$filename}\"\r\n";
-		$body .= "Content-Type: application/pdf\r\n\r\n";
+		$body .= 'Content-Type: ' . Plugin::PDF_MIME_TYPE . "\r\n\r\n";
 		$body .= $file_contents . "\r\n";
 		$body .= "--{$boundary}--\r\n";
 

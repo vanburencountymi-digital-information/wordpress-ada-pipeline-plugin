@@ -9,6 +9,23 @@ use WP_Mock\Tools\TestCase;
 
 class ClientTest extends TestCase
 {
+    /** @var string|false */
+    private $previous_error_log;
+
+    public function setUp(): void
+    {
+        parent::setUp();
+        // Refused submits log a line; keep it out of the test output.
+        $this->previous_error_log = ini_set('error_log', '/dev/null');
+    }
+
+    public function tearDown(): void
+    {
+        ini_set('error_log', (string) $this->previous_error_log);
+        unset($GLOBALS['wpdb']);
+        parent::tearDown();
+    }
+
     private const SUBMIT_RESPONSE_BODY = '{"id":"remediation-abc-123","document_id":"deadbeef","pipeline_version":"1.2.3","status":"queued"}';
 
     /**
@@ -19,6 +36,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', [
             'args' => [42],
@@ -58,6 +76,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', [
             'args' => [42],
@@ -102,6 +121,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', [
             'return' => '/uploads/2026/09/report.pdf',
@@ -148,6 +168,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
         WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
@@ -184,6 +205,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', ['return' => false]);
         WP_Mock::userFunction('wp_get_attachment_url', ['return' => 'https://example.org/missing.pdf']);
@@ -205,6 +227,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
         WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
@@ -228,6 +251,79 @@ class ClientTest extends TestCase
     }
 
     /**
+     * A 2xx with no remediation id could never be matched by a webhook, and a pending badge
+     * would then block every retry. It must fail the submission, like a rejected request.
+     *
+     * @dataProvider bodies_without_a_remediation_id
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_fails_when_the_response_carries_no_remediation_id(string $body): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 200], 'body' => $body],
+        ]);
+        // Only the error badge and a log row; no pending badge, no stored id.
+        $this->expect_failure_badge_write(42);
+
+        $this->assertFalse(Client::submit_attachment(42));
+        $this->assertConditionsMet();
+    }
+
+    public function bodies_without_a_remediation_id(): array
+    {
+        return [
+            'JSON without id' => ['{"document_id":"deadbeef","status":"queued"}'],
+            'not JSON' => ['<html>gateway error</html>'],
+            'empty' => [''],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_strips_quotes_and_line_breaks_from_the_filename_header(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => "/uploads/a\"b\r\nX-Evil: 1.pdf"]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        $sent = null;
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => static function ($url, $args) use (&$sent) {
+                $sent = $args['body'];
+
+                return ['response' => ['code' => 200], 'body' => self::SUBMIT_RESPONSE_BODY];
+            },
+        ]);
+        WP_Mock::userFunction('update_post_meta');
+
+        Client::submit_attachment(42);
+
+        $this->assertStringContainsString('filename="abX-Evil: 1.pdf"' . "\r\n", (string) $sent);
+        $this->assertStringNotContainsString("\r\nX-Evil", (string) $sent);
+    }
+
+    /**
      * @runInSeparateProcess
      * @preserveGlobalState disabled
      */
@@ -235,6 +331,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', ['return' => false]);
         WP_Mock::userFunction('wp_get_attachment_url', ['return' => 'https://example.org/missing.pdf']);
@@ -263,7 +360,8 @@ class ClientTest extends TestCase
             ->once();
         WP_Mock::userFunction('current_time', ['return' => '2026-09-28 12:00:00']);
 
-        $wpdb = Mockery::mock('wpdb');
+        // Shares the $wpdb mock_free_pdf() installed, which also serves the claim queries.
+        $wpdb = $GLOBALS['wpdb'] ?? Mockery::mock('wpdb');
         $wpdb->prefix = 'wp_';
         $wpdb->shouldReceive('insert')->once()->with(
             'wp_ada_remediation_log',
@@ -295,6 +393,7 @@ class ClientTest extends TestCase
     {
         $this->define_config_constants();
         $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
 
         WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
         WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
@@ -319,6 +418,105 @@ class ClientTest extends TestCase
 
         $this->assertTrue(Client::submit_attachment(42));
         $this->assertConditionsMet();
+    }
+
+    public function test_submit_attachment_refuses_a_non_pdf_without_touching_anything(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'image/jpeg']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertFalse(Client::submit_attachment(42));
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @dataProvider force_contexts
+     */
+    public function test_submit_attachment_refuses_while_a_claim_is_held_even_when_forced(array $context): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        // Not ours, so it must not be released, stamped or submitted.
+        $wpdb = $this->mock_wpdb(0, (time() - 5) . '|other', false);
+        $wpdb->shouldReceive('delete')->never();
+        $wpdb->shouldReceive('update')->never();
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertFalse(Client::submit_attachment(42, $context));
+        $this->assertConditionsMet();
+    }
+
+    public function test_submit_attachment_refuses_while_the_pipeline_has_a_pending_job_and_releases_its_claim(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $recent = time() - 5;
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use ($recent) {
+                return [
+                    '_ada_remediation_badge' => 'pending',
+                    '_ada_remediation_submitted_at' => $recent,
+                ][$key] ?? '';
+            },
+        ]);
+        $wpdb = $this->mock_wpdb(1, '', false);
+        $wpdb->shouldReceive('delete')
+            ->once()
+            ->with(
+                'wp_options',
+                Mockery::on(static function ($where): bool {
+                    return is_array($where)
+                        && 'ada_remediation_submit_claim_42' === ($where['option_name'] ?? null)
+                        && 1 === preg_match('/^\d+\|uuid$/', (string) ($where['option_value'] ?? ''));
+                })
+            );
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertFalse(Client::submit_attachment(42, ['force' => true]));
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @dataProvider force_contexts
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_sends_force_from_the_context(array $context, string $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/2026/09/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', ['return' => 'https://example.org/wp-json/ada-remediation/v1/callback']);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY],
+        ])->with(
+            Mockery::any(),
+            Mockery::on(function (array $request) use ($expected): bool {
+                return strpos($request['body'], "name=\"force\"\r\n\r\n{$expected}\r\n") !== false;
+            })
+        );
+
+        $this->assertTrue(Client::submit_attachment(42, $context));
+        $this->assertConditionsMet();
+    }
+
+    public function force_contexts(): array
+    {
+        return [
+            'no context'   => [[], 'false'],
+            'force true'   => [['force' => true], 'true'],
+            'force false'  => [['force' => false], 'false'],
+        ];
     }
 
     /**
@@ -536,5 +734,38 @@ class ClientTest extends TestCase
                 return $response['body'] ?? '';
             },
         ]);
+    }
+
+    /**
+     * A PDF with no claim held and no job pending, so submit_attachment() proceeds.
+     */
+    private function mock_free_pdf(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        WP_Mock::userFunction('get_post_meta', ['return' => '']);
+        WP_Mock::userFunction('update_post_meta')
+            ->with(42, '_ada_remediation_submitted_at', Mockery::type('integer'));
+        $this->mock_wpdb(1);
+    }
+
+    /**
+     * Stands in for $wpdb. $inserted is what the claim's INSERT IGNORE affects: 1 wins the claim, 0 loses it.
+     */
+    private function mock_wpdb(int $inserted, string $stored_claim = '', bool $allow_release = true): \Mockery\MockInterface
+    {
+        $wpdb = Mockery::mock('wpdb');
+        $wpdb->options = 'wp_options';
+        $wpdb->shouldReceive('prepare')->andReturnUsing(static function (string $query): string {
+            return $query;
+        });
+        $wpdb->shouldReceive('query')->andReturn($inserted);
+        $wpdb->shouldReceive('get_var')->andReturn($stored_claim);
+        if ($allow_release) {
+            $wpdb->shouldReceive('delete')->andReturn(1);
+        }
+        $GLOBALS['wpdb'] = $wpdb;
+
+        return $wpdb;
     }
 }

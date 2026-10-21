@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<ruleset name="AdaRemediation">
+    <description>Project rules that stop magic strings creeping back in (DIC-2409).</description>
+</ruleset>
