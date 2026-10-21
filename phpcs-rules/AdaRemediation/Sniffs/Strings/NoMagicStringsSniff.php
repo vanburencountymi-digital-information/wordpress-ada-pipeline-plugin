@@ -1,6 +1,6 @@
 <?php
 /**
- * Flags bare badge, pipeline-vocabulary and post-meta-key strings.
+ * Flags bare badge, pipeline-vocabulary, post-meta-key and hook-name strings.
  *
  * @package AdaRemediationClient
  */
@@ -12,8 +12,9 @@ use PHP_CodeSniffer\Sniffs\Sniff;
 
 /**
  * A string that means something to this plugin (a badge, a pipeline status, step or severity,
- * a `_ada_remediation_*` meta key) is spelled once, as a constant, and used by name. A typo in
- * a bare copy fails silently: the badge falls back to grey, or a lookup quietly returns nothing.
+ * a `_ada_remediation_*` meta key, a hook or filter name adapters subscribe to) is spelled once, as a constant, and used by name. A typo in
+ * a bare copy fails silently: the badge falls back to grey, a lookup quietly returns nothing,
+ * or a listener never fires.
  *
  * Declaring the constant is the one place the literal is allowed.
  */
@@ -53,6 +54,20 @@ class NoMagicStringsSniff implements Sniff {
 	);
 
 	/**
+	 * Hook and filter names of this plugin's public API. Override in a ruleset with a
+	 * comma-separated `<property name="hookNames" type="array" value="a,b"/>`.
+	 *
+	 * @var string[]
+	 */
+	public $hookNames = array(
+		'ada_remediation_result',
+		'ada_remediation_apply_result',
+		'ada_remediation_submit_attachment',
+		'ada_remediation_auto_trigger_on_upload',
+		'ada_remediation_suppress_file_replacement',
+	);
+
+	/**
 	 * Tokens this sniff listens for.
 	 *
 	 * @return array
@@ -80,6 +95,17 @@ class NoMagicStringsSniff implements Sniff {
 				'Post meta key "%s" must be used through Submission_State_Service, not spelled out.',
 				$stack_ptr,
 				'MetaKey',
+				array( $value )
+			);
+
+			return;
+		}
+
+		if ( in_array( $value, $this->hookNames, true ) ) {
+			$phpcs_file->addError(
+				'Hook name "%s" must come from its constant, not be spelled out.',
+				$stack_ptr,
+				'HookName',
 				array( $value )
 			);
 

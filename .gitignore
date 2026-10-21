@@ -16,3 +16,4 @@ PLANNING.md
 #SFTP
 .vscode/
 .vscode/sftp.json
+.env
