@@ -36,19 +36,43 @@ class Client {
 	 * @param array $context       Optional. self::CONTEXT_FORCE => true bypasses the pipeline's
 	 *                             content-hash dedupe. It does not bypass the in-flight check.
 	 * @return bool False if the attachment is not a PDF, a submission is already in flight
-	 *              (nothing is changed for either), or the submission failed.
+	 *              (nothing is changed for either), or the submission failed. Use
+	 *              submit_with_result() to tell those apart.
 	 */
 	public static function submit_attachment( int $attachment_id, array $context = array() ): bool {
+		return self::submit_with_result( $attachment_id, $context )->is_submitted();
+	}
+
+	/**
+	 * Submits an attachment's PDF to the remediation pipeline, saying what happened.
+	 *
+	 * @param int   $attachment_id The attachment to submit.
+	 * @param array $context       See submit_attachment().
+	 * @return Submit_Result Refused (nothing changed), failed, or submitted.
+	 */
+	public static function submit_with_result( int $attachment_id, array $context = array() ): Submit_Result {
 		if ( ! Plugin::is_pdf( $attachment_id ) ) {
-			return false;
+			return Submit_Result::refused();
 		}
 
 		return Submission_State_Service::run_exclusive(
 			$attachment_id,
-			static function () use ( $attachment_id, $context ): bool {
+			static function () use ( $attachment_id, $context ): Submit_Result {
 				return self::send( $attachment_id, $context );
 			}
 		);
+	}
+
+	/**
+	 * Marks the submission failed and says so.
+	 *
+	 * @param int $attachment_id The attachment whose submission failed.
+	 * @return Submit_Result Always failed.
+	 */
+	private static function fail_and_mark( int $attachment_id ): Submit_Result {
+		self::mark_submission_failed( $attachment_id );
+
+		return Submit_Result::failed();
 	}
 
 	/**
@@ -56,15 +80,13 @@ class Client {
 	 *
 	 * @param int   $attachment_id The attachment to submit.
 	 * @param array $context       See submit_attachment().
-	 * @return bool Whether the pipeline accepted the submission.
+	 * @return Submit_Result Submitted if the pipeline accepted it, otherwise failed.
 	 */
-	private static function send( int $attachment_id, array $context ): bool {
+	private static function send( int $attachment_id, array $context ): Submit_Result {
 		$file_contents = self::read_attachment_contents( $attachment_id );
 
 		if ( false === $file_contents || null === $file_contents ) {
-			self::mark_submission_failed( $attachment_id );
-
-			return false;
+			return self::fail_and_mark( $attachment_id );
 		}
 
 		$filename = basename( (string) get_attached_file( $attachment_id ) );
@@ -92,18 +114,14 @@ class Client {
 		);
 
 		if ( is_wp_error( $response ) || ! self::is_success_status( wp_remote_retrieve_response_code( $response ) ) ) {
-			self::mark_submission_failed( $attachment_id );
-
-			return false;
+			return self::fail_and_mark( $attachment_id );
 		}
 
 		if ( ! self::store_submission_result( $attachment_id, wp_remote_retrieve_body( $response ) ) ) {
-			self::mark_submission_failed( $attachment_id );
-
-			return false;
+			return self::fail_and_mark( $attachment_id );
 		}
 
-		return true;
+		return Submit_Result::submitted();
 	}
 
 	/**

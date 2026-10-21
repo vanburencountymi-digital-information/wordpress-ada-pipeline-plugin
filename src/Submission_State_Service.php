@@ -14,7 +14,7 @@ namespace AdaRemediationClient;
  * submit path (upload trigger, cron, adapters, batch runner) agrees on what "in flight" means.
  *
  * Two pieces of state:
- * - a claim: held only while one request is inside Client::submit_attachment(). It expires by
+ * - a claim: held only while one request is inside Client::submit_with_result(). It expires by
  *   itself, so a request that dies mid-submit can't lock the file. It lives in wp_options, whose
  *   option_name is a unique key, because postmeta has none and add_post_meta( $unique ) is a
  *   SELECT then an INSERT that two simultaneous requests can both pass.
@@ -267,17 +267,19 @@ class Submission_State_Service {
 	 * queued submit. Callers outside this class never see the claim, so they can't skip it.
 	 *
 	 * @param int      $attachment_id The attachment.
-	 * @param callable $send          Does the submit and returns whether it succeeded.
-	 * @return bool False if another submit is running or the pipeline has a pending job for the
-	 *              file (nothing was changed); otherwise what $send returned.
+	 * @param callable $send          Does the submit and returns its Submit_Result.
+	 * @return Submit_Result Refused if another submit is running or the pipeline has a pending
+	 *                       job for the file (nothing was changed); otherwise what $send returned.
+	 * @throws \UnexpectedValueException If $send returns anything but a Submit_Result. The claim
+	 *                                   is still released.
 	 */
-	public static function run_exclusive( int $attachment_id, callable $send ): bool {
+	public static function run_exclusive( int $attachment_id, callable $send ): Submit_Result {
 		$token = self::claim( $attachment_id );
 
 		if ( null === $token ) {
 			self::log_skip( $attachment_id, 'another submit holds the claim' );
 
-			return false;
+			return Submit_Result::refused();
 		}
 
 		try {
@@ -285,10 +287,17 @@ class Submission_State_Service {
 			if ( self::has_pending_job( $attachment_id ) ) {
 				self::log_skip( $attachment_id, 'the pipeline has a pending job' );
 
-				return false;
+				return Submit_Result::refused();
 			}
 
-			return (bool) $send();
+			$result = $send();
+
+			// Said outright, not left to a bare TypeError: whoever passed the callback needs to know.
+			if ( ! $result instanceof Submit_Result ) {
+				throw new \UnexpectedValueException( 'The submit callback must return a Submit_Result.' );
+			}
+
+			return $result;
 		} finally {
 			self::release( $attachment_id, $token );
 		}
@@ -403,7 +412,7 @@ class Submission_State_Service {
 	/**
 	 * Whether any submission is out for this file: a submit is running, the file is queued
 	 * for cron, or the pipeline is working on it. For adapters and the batch runner to check
-	 * before queueing a job; submit_attachment() itself uses run_exclusive().
+	 * before queueing a job; Client::submit_with_result() itself uses run_exclusive().
 	 *
 	 * @param int $attachment_id The attachment.
 	 * @return bool True if a new submit for this file would collide with one already out.

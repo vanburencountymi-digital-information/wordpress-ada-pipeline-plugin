@@ -3,6 +3,7 @@
 namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Client;
+use AdaRemediationClient\Submit_Result;
 use Mockery;
 use WP_Mock;
 use WP_Mock\Tools\TestCase;
@@ -694,6 +695,79 @@ class ClientTest extends TestCase
         $result = Client::download_remediated_file('https://pipeline.example.org/api/document-download/abc/');
 
         $this->assertInstanceOf(\WP_Error::class, $result);
+        $this->assertConditionsMet();
+    }
+
+    public function test_submit_with_result_says_refused_for_a_non_pdf(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'image/jpeg']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertSame(Submit_Result::REFUSED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    public function test_submit_with_result_says_refused_while_a_claim_is_held(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $this->mock_wpdb(0, (time() - 5) . '|other', false);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertSame(Submit_Result::REFUSED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_with_result_says_failed_when_no_file_could_be_read(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => false]);
+        WP_Mock::userFunction('wp_get_attachment_url', ['return' => 'https://example.org/missing.pdf']);
+        WP_Mock::userFunction('wp_remote_get', [
+            'return' => ['errors' => ['http_request_failed' => ['Could not resolve host']]],
+        ]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+        $this->expect_failure_badge_write(42);
+
+        $this->assertSame(Submit_Result::FAILED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_with_result_says_submitted_when_the_pipeline_accepts_the_file(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY],
+        ]);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertSame(Submit_Result::SUBMITTED, $result->outcome());
+        $this->assertTrue($result->is_submitted());
         $this->assertConditionsMet();
     }
 

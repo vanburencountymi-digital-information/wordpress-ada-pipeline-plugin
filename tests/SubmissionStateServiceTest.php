@@ -4,6 +4,7 @@ namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Client;
 use AdaRemediationClient\Submission_State_Service;
+use AdaRemediationClient\Submit_Result;
 use Mockery;
 use WP_Mock;
 use WP_Mock\Tools\TestCase;
@@ -57,21 +58,21 @@ class SubmissionStateServiceTest extends TestCase
                 })
             );
 
-        $this->assertTrue(Submission_State_Service::run_exclusive(42, static function (): bool {
-            return true;
-        }));
+        $this->assertSame(Submit_Result::SUBMITTED, Submission_State_Service::run_exclusive(42, static function (): Submit_Result {
+            return Submit_Result::submitted();
+        })->outcome());
     }
 
     /**
      * @dataProvider callback_results
      */
-    public function test_run_exclusive_returns_what_the_callback_returns(bool $result): void
+    public function test_run_exclusive_returns_what_the_callback_returns(Submit_Result $result): void
     {
         WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
         $this->meta([]);
         $this->free_wpdb();
 
-        $this->assertSame($result, Submission_State_Service::run_exclusive(42, static function () use ($result): bool {
+        $this->assertSame($result, Submission_State_Service::run_exclusive(42, static function () use ($result): Submit_Result {
             return $result;
         }));
     }
@@ -79,8 +80,35 @@ class SubmissionStateServiceTest extends TestCase
     public function callback_results(): array
     {
         return [
-            'success' => [true],
-            'failure' => [false],
+            'success' => [Submit_Result::submitted()],
+            'failure' => [Submit_Result::failed()],
+        ];
+    }
+
+    /**
+     * @dataProvider wrong_callback_results
+     * @param mixed $wrong
+     */
+    public function test_run_exclusive_rejects_a_callback_that_does_not_return_a_submit_result_and_still_releases($wrong): void
+    {
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $this->meta([]);
+        $wpdb = $this->free_wpdb(false);
+        $wpdb->shouldReceive('delete')->once();
+
+        $this->expectException(\UnexpectedValueException::class);
+
+        Submission_State_Service::run_exclusive(42, static function () use ($wrong) {
+            return $wrong;
+        });
+    }
+
+    public function wrong_callback_results(): array
+    {
+        return [
+            'bool' => [true],
+            'null' => [null],
+            'string' => ['submitted'],
         ];
     }
 
@@ -92,7 +120,7 @@ class SubmissionStateServiceTest extends TestCase
         $wpdb->shouldReceive('delete')->once();
 
         try {
-            Submission_State_Service::run_exclusive(42, static function (): bool {
+            Submission_State_Service::run_exclusive(42, static function (): Submit_Result {
                 throw new \RuntimeException('boom');
             });
             $this->fail('The exception should propagate.');
@@ -113,11 +141,11 @@ class SubmissionStateServiceTest extends TestCase
         $wpdb->shouldReceive('update')->never();
         $wpdb->shouldReceive('delete')->never();
 
-        $this->assertFalse(Submission_State_Service::run_exclusive(42, static function () use (&$called): bool {
+        $this->assertSame(Submit_Result::REFUSED, Submission_State_Service::run_exclusive(42, static function () use (&$called): Submit_Result {
             $called = true;
 
-            return true;
-        }));
+            return Submit_Result::submitted();
+        })->outcome());
         $this->assertFalse($called);
         $this->assertStringContainsString('submit skipped for attachment 42: another submit holds the claim', (string) file_get_contents($this->log_file));
     }
@@ -130,11 +158,11 @@ class SubmissionStateServiceTest extends TestCase
         $wpdb = $this->free_wpdb(false);
         $wpdb->shouldReceive('delete')->once();
 
-        $this->assertFalse(Submission_State_Service::run_exclusive(42, static function () use (&$called): bool {
+        $this->assertSame(Submit_Result::REFUSED, Submission_State_Service::run_exclusive(42, static function () use (&$called): Submit_Result {
             $called = true;
 
-            return true;
-        }));
+            return Submit_Result::submitted();
+        })->outcome());
         $this->assertFalse($called);
         $this->assertStringContainsString('submit skipped for attachment 42: the pipeline has a pending job', (string) file_get_contents($this->log_file));
     }
@@ -145,9 +173,9 @@ class SubmissionStateServiceTest extends TestCase
         $this->meta(['_ada_remediation_badge' => 'queued', self::STAMP => time() - 5]);
         $this->free_wpdb();
 
-        $this->assertTrue(Submission_State_Service::run_exclusive(42, static function (): bool {
-            return true;
-        }));
+        $this->assertSame(Submit_Result::SUBMITTED, Submission_State_Service::run_exclusive(42, static function (): Submit_Result {
+            return Submit_Result::submitted();
+        })->outcome());
     }
 
     public function test_run_exclusive_retries_the_insert_when_the_holder_released_in_between(): void
@@ -162,9 +190,9 @@ class SubmissionStateServiceTest extends TestCase
         $wpdb->shouldReceive('update')->never();
         $wpdb->shouldReceive('delete')->andReturn(1);
 
-        $this->assertTrue(Submission_State_Service::run_exclusive(42, static function (): bool {
-            return true;
-        }));
+        $this->assertSame(Submit_Result::SUBMITTED, Submission_State_Service::run_exclusive(42, static function (): Submit_Result {
+            return Submit_Result::submitted();
+        })->outcome());
     }
 
     public function test_run_exclusive_retries_the_insert_only_once(): void
@@ -176,9 +204,9 @@ class SubmissionStateServiceTest extends TestCase
         $wpdb->shouldReceive('get_var')->once()->andReturn('');
         $wpdb->shouldReceive('delete')->never();
 
-        $this->assertFalse(Submission_State_Service::run_exclusive(42, static function (): bool {
-            return true;
-        }));
+        $this->assertSame(Submit_Result::REFUSED, Submission_State_Service::run_exclusive(42, static function (): Submit_Result {
+            return Submit_Result::submitted();
+        })->outcome());
     }
 
     /**
@@ -207,10 +235,10 @@ class SubmissionStateServiceTest extends TestCase
             ->andReturn($rows_changed);
         $called = false;
 
-        Submission_State_Service::run_exclusive(42, static function () use (&$called): bool {
+        Submission_State_Service::run_exclusive(42, static function () use (&$called): Submit_Result {
             $called = true;
 
-            return true;
+            return Submit_Result::submitted();
         });
 
         $this->assertSame($won, $called);
