@@ -9,9 +9,9 @@ namespace AdaRemediationClient;
 
 /**
  * Receives the pipeline's signed result callback. Registered on rest_api_init by
- * Plugin::boot(). verify_signature()/handle() take plain strings/arrays.
+ * Plugin::boot(). authorize()/handle() take plain strings/arrays.
  * The two small closures in register_routes() are the only place a real WP_REST_Request
- * or WP_Error is touched, and are thin enough (pure delegation, no branching) not to
+ * or WP_Error is touched, and are thin enough (delegate, then convert the outcome) not to
  * need their own tests.
  */
 class Webhook {
@@ -20,6 +20,25 @@ class Webhook {
 	public const ROUTE            = '/callback';
 	public const SIGNATURE_HEADER = 'X-Webhook-Signature';
 	public const SIGNATURE_PREFIX = 'sha256=';
+
+	/**
+	 * The action adapters hook to receive a result. Public API: keep the value.
+	 */
+	public const RESULT_HOOK = 'ada_remediation_result';
+
+	/**
+	 * One-off WP-Cron event that fires RESULT_HOOK, so adapters' slow work (a file
+	 * swap can take 30s+) runs after the webhook has answered instead of timing the pipeline out.
+	 */
+	public const APPLY_RESULT_HOOK = 'ada_remediation_apply_result';
+
+	/**
+	 * Failed signature checks one address may make per window before it is refused outright.
+	 * Only failures count, so the pipeline's own valid callbacks are never throttled.
+	 */
+	private const FAILURE_LIMIT          = 20;
+	private const FAILURE_WINDOW_SECONDS = 600;
+	private const FAILURE_KEY_PREFIX     = 'ada_remediation_webhook_failures_';
 
 	private const STEP_PRECHECK  = 'precheck';
 	private const STEP_POSTCHECK = 'postcheck';
@@ -50,11 +69,54 @@ class Webhook {
 
 					return $outcome['body'];
 				},
-				'permission_callback' => static function ( \WP_REST_Request $request ): bool {
-					return self::verify_signature( (string) $request->get_body(), $request->get_header( self::SIGNATURE_HEADER ) );
+				'permission_callback' => static function ( \WP_REST_Request $request ) {
+					$outcome = self::authorize( (string) $request->get_body(), $request->get_header( self::SIGNATURE_HEADER ), self::client_ip() );
+
+					if ( ! $outcome['ok'] ) {
+						return new \WP_Error( $outcome['code'], $outcome['message'], array( 'status' => $outcome['status'] ) );
+					}
+
+					return true;
 				},
 			)
 		);
+	}
+
+	/**
+	 * Checks the request's signature, and refuses an address that keeps failing it.
+	 * The failure count is a transient and is not incremented atomically, so a burst can slip a
+	 * few extra attempts past the limit. Behind a shared proxy, addresses that share one IP also
+	 * share one count; a valid callback from a locked-out address is refused until the window passes.
+	 *
+	 * @param string      $raw_body         The raw request body.
+	 * @param string|null $signature_header The X-Webhook-Signature header value.
+	 * @param string      $client_ip        The caller's address; empty means don't throttle.
+	 * @return array{ok: bool, status?: int, code?: string, message?: string}
+	 */
+	public static function authorize( string $raw_body, ?string $signature_header, string $client_ip ): array {
+		$key = '' === $client_ip ? '' : self::FAILURE_KEY_PREFIX . md5( $client_ip );
+
+		if ( '' !== $key && (int) get_transient( $key ) >= self::FAILURE_LIMIT ) {
+			return self::error_outcome( 429, 'ada_remediation_rate_limited', 'Too many failed requests.' );
+		}
+
+		if ( self::verify_signature( $raw_body, $signature_header ) ) {
+			return array( 'ok' => true );
+		}
+
+		if ( '' !== $key ) {
+			set_transient( $key, (int) get_transient( $key ) + 1, self::FAILURE_WINDOW_SECONDS );
+		}
+
+		return self::error_outcome( 401, 'ada_remediation_invalid_signature', 'Invalid signature.' );
+	}
+
+	/**
+	 * The caller's address. Only REMOTE_ADDR: forwarded headers are caller-supplied, so trusting
+	 * them would let an attacker choose which address gets counted.
+	 */
+	private static function client_ip(): string {
+		return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
 	}
 
 	/**
@@ -158,12 +220,50 @@ class Webhook {
 		// Marked before the hooks run, so the side effects happen at most once per job.
 		Submission_State_Service::mark_applied( $attachment_id, (string) $data['remediation_id'] );
 
-		do_action( 'ada_remediation_result', $attachment_id, $result );
+		self::queue_result_hooks( $attachment_id, $result );
 
 		return array(
 			'ok'   => true,
 			'body' => array( 'status' => 'ok' ),
 		);
+	}
+
+	/**
+	 * Fires RESULT_HOOK, the adapters' hook. Called by WP-Cron from the event queue_result_hooks()
+	 * schedules. The job is already marked applied, so nothing retries a listener that fails:
+	 * the failure is written to the remediation log so someone can find it.
+	 *
+	 * @param int   $attachment_id The attachment the result belongs to.
+	 * @param array $result        The webhook result array (see handle()).
+	 */
+	public static function run_result_hooks( int $attachment_id, array $result ): void {
+		try {
+			do_action( self::RESULT_HOOK, $attachment_id, $result );
+		} catch ( \Throwable $error ) {
+			Remediation_Log::record_warning(
+				$attachment_id,
+				Submission_State_Service::remediation_id( $attachment_id ),
+				(string) ( $result['pipeline_version'] ?? '' ),
+				'A result listener failed and the result was not fully applied: ' . $error->getMessage()
+			);
+		}
+	}
+
+	/**
+	 * Hands the result to adapters after this request has answered the pipeline, which gives up
+	 * after about 10s. If the event can't be scheduled the hooks run now, slowly, rather than never.
+	 *
+	 * @param int   $attachment_id The attachment the result belongs to.
+	 * @param array $result        The webhook result array (see handle()).
+	 */
+	private static function queue_result_hooks( int $attachment_id, array $result ): void {
+		if ( Plugin::schedule_once( self::APPLY_RESULT_HOOK, array( $attachment_id, $result ) ) ) {
+			spawn_cron();
+
+			return;
+		}
+
+		self::run_result_hooks( $attachment_id, $result );
 	}
 
 	/**

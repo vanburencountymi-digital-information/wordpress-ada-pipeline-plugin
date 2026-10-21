@@ -236,6 +236,7 @@ class PluginTest extends TestCase
         WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
         WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_attachment'], 10, 2);
         WP_Mock::expectActionAdded('rest_api_init', [\AdaRemediationClient\Webhook::class, 'register_routes']);
+        WP_Mock::expectActionAdded(\AdaRemediationClient\Webhook::APPLY_RESULT_HOOK, [\AdaRemediationClient\Webhook::class, 'run_result_hooks'], 10, 2);
         WP_Mock::expectFilterAdded('manage_media_columns', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'register_column']);
         WP_Mock::expectActionAdded('manage_media_custom_column', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'render_column'], 10, 2);
         WP_Mock::expectActionAdded('ada_remediation_result', [File_Replacer::class, 'maybe_replace'], File_Replacer::HOOK_PRIORITY, 2);
@@ -243,6 +244,29 @@ class PluginTest extends TestCase
         Plugin::boot();
 
         $this->assertHooksAdded();
+    }
+
+    /**
+     * @dataProvider scheduleOnceProvider
+     */
+    public function test_schedule_once_reports_whether_the_event_will_run(bool $scheduled, $already_waiting, bool $expected): void
+    {
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => $scheduled])
+            ->with(Mockery::type('int'), 'some_hook', [7, 'x']);
+        WP_Mock::userFunction('wp_next_scheduled', ['return' => $already_waiting])
+            ->with('some_hook', [7, 'x']);
+
+        $this->assertSame($expected, Plugin::schedule_once('some_hook', [7, 'x']));
+        $this->assertConditionsMet();
+    }
+
+    public static function scheduleOnceProvider(): array
+    {
+        return [
+            'newly scheduled' => [true, false, true],
+            'identical event already waiting' => [false, 1700000000, true],
+            'could not be scheduled' => [false, false, false],
+        ];
     }
 
     /**

@@ -28,6 +28,8 @@ class File_Replacer {
 	 */
 	public const HOOK_PRIORITY = 20;
 
+	public const SUPPRESS_FILTER = 'ada_remediation_suppress_file_replacement';
+
 	private const REACHABILITY_BACKOFF_SECONDS = array( 2, 4, 8 );
 
 	/**
@@ -86,7 +88,7 @@ class File_Replacer {
 	 * @param array $result        The webhook result array.
 	 */
 	private static function is_suppressed( int $attachment_id, array $result ): bool {
-		return (bool) apply_filters( 'ada_remediation_suppress_file_replacement', false, $attachment_id, $result );
+		return (bool) apply_filters( self::SUPPRESS_FILTER, false, $attachment_id, $result );
 	}
 
 	/**

@@ -21,6 +21,8 @@ class Plugin {
 
 	public const SUBMIT_ATTACHMENT_HOOK = 'ada_remediation_submit_attachment';
 
+	public const AUTO_TRIGGER_FILTER = 'ada_remediation_auto_trigger_on_upload';
+
 	public const PDF_MIME_TYPE = 'application/pdf';
 
 	/**
@@ -111,9 +113,10 @@ class Plugin {
 		// reach submit_attachment(); events scheduled with only the ID still work (default context).
 		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_attachment' ), 10, 2 );
 		add_action( 'rest_api_init', array( Webhook::class, 'register_routes' ) );
+		add_action( Webhook::APPLY_RESULT_HOOK, array( Webhook::class, 'run_result_hooks' ), 10, 2 );
 		add_filter( 'manage_media_columns', array( Media_Library_Badge_Column::class, 'register_column' ) );
 		add_action( 'manage_media_custom_column', array( Media_Library_Badge_Column::class, 'render_column' ), 10, 2 );
-		add_action( 'ada_remediation_result', array( File_Replacer::class, 'maybe_replace' ), File_Replacer::HOOK_PRIORITY, 2 );
+		add_action( Webhook::RESULT_HOOK, array( File_Replacer::class, 'maybe_replace' ), File_Replacer::HOOK_PRIORITY, 2 );
 	}
 
 	/**
@@ -127,13 +130,23 @@ class Plugin {
 	public static function maybe_submit_on_upload( int $attachment_id ): void {
 		if ( self::should_auto_submit( $attachment_id ) && Submission_State_Service::mark_queued( $attachment_id ) ) {
 			// A file left queued with no event would look in flight for a while and then never be sent.
-			// WP-Cron also returns false when an identical event is already scheduled; that one will run.
-			$args = array( $attachment_id );
-
-			if ( ! wp_schedule_single_event( time(), self::SUBMIT_ATTACHMENT_HOOK, $args ) && ! wp_next_scheduled( self::SUBMIT_ATTACHMENT_HOOK, $args ) ) {
+			if ( ! self::schedule_once( self::SUBMIT_ATTACHMENT_HOOK, array( $attachment_id ) ) ) {
 				Client::mark_submission_failed( $attachment_id );
 			}
 		}
+	}
+
+	/**
+	 * Schedules a one-off WP-Cron event to run the next time cron does.
+	 *
+	 * @param string $hook The action to fire.
+	 * @param array  $args The action's arguments.
+	 * @return bool True if it is scheduled, or an identical event already is (that one will run);
+	 *              false if it could not be scheduled.
+	 */
+	public static function schedule_once( string $hook, array $args ): bool {
+		// WP-Cron also returns false when an identical event is already waiting.
+		return (bool) wp_schedule_single_event( time(), $hook, $args ) || false !== wp_next_scheduled( $hook, $args );
 	}
 
 	/**
@@ -150,7 +163,7 @@ class Plugin {
 
 	/**
 	 * PDF attachments only, and only if no adapter has suppressed the default
-	 * trigger via the ada_remediation_auto_trigger_on_upload filter (see Layer 2,
+	 * trigger via the self::AUTO_TRIGGER_FILTER filter (see Layer 2,
 	 * which drives submission itself from a richer hook instead).
 	 *
 	 * @param int $attachment_id The attachment to check.
@@ -161,6 +174,6 @@ class Plugin {
 			return false;
 		}
 
-		return (bool) apply_filters( 'ada_remediation_auto_trigger_on_upload', true, $attachment_id );
+		return (bool) apply_filters( self::AUTO_TRIGGER_FILTER, true, $attachment_id );
 	}
 }

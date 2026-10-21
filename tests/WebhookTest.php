@@ -132,8 +132,7 @@ class WebhookTest extends TestCase
         WP_Mock::userFunction('update_post_meta')
             ->with(13364, '_ada_remediation_content_hash', 'deadbeef')->once();
         $this->expect_badge_write(13364, 'dark-green', 'remediation-abc-123');
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 13364, Mockery::type('array'));
+        $this->expect_result_queued(13364);
 
         $outcome = Webhook::handle($payload, 13364);
 
@@ -153,7 +152,7 @@ class WebhookTest extends TestCase
         WP_Mock::userFunction('get_post_meta')->with(42, '_ada_remediation_applied_id', true)->andReturn('remediation-abc-123');
         WP_Mock::userFunction('get_posts', ['return' => [42]]);
         WP_Mock::userFunction('update_post_meta', ['times' => 0]);
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
 
         $outcome = Webhook::handle($payload, 13364);
 
@@ -228,10 +227,9 @@ class WebhookTest extends TestCase
             return $query['meta_key'] === '_ada_remediation_id' && $query['meta_value'] === 'remediation-abc-123';
         }));
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 42, Mockery::on(function (array $result) use ($expected_badge): bool {
+        $this->expect_result_queued(42, function (array $result) use ($expected_badge): bool {
                 return $result['badge'] === $expected_badge && $result['status'] === 'noncompliant';
-            }));
+            });
 
         $outcome = Webhook::handle($payload);
 
@@ -275,10 +273,9 @@ class WebhookTest extends TestCase
         ]);
         WP_Mock::userFunction('get_posts', ['return' => [42]]);
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+        $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'dark-green' && $result['status'] === 'compliant';
-            }));
+            });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
@@ -302,10 +299,9 @@ class WebhookTest extends TestCase
         $this->expect_badge_write(42, 'error', 'remediation-abc-123');
         WP_Mock::userFunction('get_posts', ['return' => [42]]);
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+        $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'error' && $result['status'] === 'error';
-            }));
+            });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
@@ -329,10 +325,9 @@ class WebhookTest extends TestCase
         $this->expect_badge_write(42, 'error', 'remediation-abc-123');
         WP_Mock::userFunction('get_posts', ['return' => [42]]);
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 42, Mockery::on(function (array $result): bool {
+        $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'error' && $result['status'] === 'skipped';
-            }));
+            });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
@@ -361,8 +356,7 @@ class WebhookTest extends TestCase
 
         $this->expect_badge_write(94616, 'dark-green', 'remediation-abc-123');
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 94616, Mockery::type('array'));
+        $this->expect_result_queued(94616);
 
         $outcome = Webhook::handle($payload, 94616);
 
@@ -394,8 +388,7 @@ class WebhookTest extends TestCase
 
         $this->expect_badge_write(94608, 'dark-green', 'remediation-abc-123');
 
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
-            ->with('ada_remediation_result', 94608, Mockery::type('array'));
+        $this->expect_result_queued(94608);
 
         $outcome = Webhook::handle($payload, 94616);
 
@@ -421,7 +414,7 @@ class WebhookTest extends TestCase
             ->with(42, '_ada_remediation_applied_id', true)
             ->andReturn('remediation-abc-123');
         WP_Mock::userFunction('update_post_meta', ['times' => 0]);
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
 
         $outcome = Webhook::handle($payload);
 
@@ -447,12 +440,176 @@ class WebhookTest extends TestCase
             ->with(42, '_ada_remediation_applied_id', true)
             ->andReturn('remediation-OLD');
         $this->expect_badge_write(42, 'dark-green', 'remediation-NEW');
-        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1]);
+        $this->expect_result_queued(42);
 
         $outcome = Webhook::handle($payload);
 
         $this->assertTrue($outcome['ok']);
         $this->assertArrayNotHasKey('duplicate', $outcome['body']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * The adapters' hook is queued for WP-Cron, not fired inside the webhook request.
+     *
+     * @param callable|null $result_check Extra check on the queued result array.
+     */
+    private function expect_result_queued(int $attachment_id, ?callable $result_check = null): void
+    {
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])
+            ->with(
+                Mockery::type('int'),
+                Webhook::APPLY_RESULT_HOOK,
+                Mockery::on(function (array $args) use ($attachment_id, $result_check): bool {
+                    return $args[0] === $attachment_id
+                        && is_array($args[1])
+                        && (null === $result_check || $result_check($args[1]));
+                })
+            )
+            ->andReturn(true);
+        WP_Mock::userFunction('spawn_cron', ['times' => 1]);
+    }
+
+    /**
+     * A file swap can take 30s+ and the pipeline gives up after about 10s, so the result hooks
+     * must not run inside the webhook request.
+     */
+    public function test_handle_queues_the_result_hooks_instead_of_running_them(): void
+    {
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        $this->expect_badge_write(42, 'dark-green', 'remediation-abc-123');
+        $this->expect_result_queued(42);
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+
+        $outcome = Webhook::handle('{"remediation_id":"remediation-abc-123","status":"compliant"}');
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * Losing the result silently would be worse than answering slowly.
+     */
+    public function test_handle_runs_the_result_hooks_now_if_they_cannot_be_scheduled(): void
+    {
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        $this->expect_badge_write(42, 'dark-green', 'remediation-abc-123');
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])->andReturn(false);
+        WP_Mock::userFunction('wp_next_scheduled', ['times' => 1])->andReturn(false);
+        WP_Mock::userFunction('spawn_cron', ['times' => 0]);
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, Mockery::type('array'));
+
+        $outcome = Webhook::handle('{"remediation_id":"remediation-abc-123","status":"compliant"}');
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * WP-Cron returns false for an identical event already waiting; that one will run the hooks.
+     */
+    public function test_handle_does_not_run_the_hooks_twice_when_an_identical_event_is_already_scheduled(): void
+    {
+        WP_Mock::userFunction('get_posts', ['return' => [42]]);
+        $this->expect_badge_write(42, 'dark-green', 'remediation-abc-123');
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1])->andReturn(false);
+        WP_Mock::userFunction('wp_next_scheduled', ['times' => 1])->andReturn(1792594000);
+        WP_Mock::userFunction('spawn_cron', ['times' => 1]);
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 0]);
+
+        $outcome = Webhook::handle('{"remediation_id":"remediation-abc-123","status":"compliant"}');
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    public function test_run_result_hooks_fires_the_adapters_hook(): void
+    {
+        $result = ['status' => 'compliant', 'badge' => 'dark-green'];
+
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->with('ada_remediation_result', 42, $result);
+
+        Webhook::run_result_hooks(42, $result);
+
+        $this->assertConditionsMet();
+    }
+
+    public function test_run_result_hooks_logs_a_warning_when_a_listener_throws(): void
+    {
+        WP_Mock::userFunction('AdaRemediationClient\\do_action', ['times' => 1])
+            ->andThrow(new \RuntimeException('swap blew up'));
+        WP_Mock::userFunction('get_post_meta')->with(42, '_ada_remediation_id', true)->andReturn('remediation-abc-123');
+        $this->expect_warning_row(42, 'remediation-abc-123');
+
+        Webhook::run_result_hooks(42, ['pipeline_version' => '1.2.3']);
+
+        $this->assertConditionsMet();
+    }
+
+    public function test_authorize_refuses_an_address_over_the_failure_limit_without_checking_the_signature(): void
+    {
+        // The secret constant is deliberately undefined: reaching verify_signature() would fail the test.
+        WP_Mock::userFunction('get_transient', ['times' => 1, 'return' => 20])
+            ->with('ada_remediation_webhook_failures_' . md5('203.0.113.9'));
+        WP_Mock::userFunction('set_transient', ['times' => 0]);
+
+        $outcome = Webhook::authorize('{}', 'sha256=whatever', '203.0.113.9');
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(429, $outcome['status']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authorize_counts_a_failed_signature_against_the_address(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        $key = 'ada_remediation_webhook_failures_' . md5('203.0.113.9');
+        WP_Mock::userFunction('get_transient', ['return' => 3])->with($key);
+        WP_Mock::userFunction('set_transient', ['times' => 1])->with($key, 4, 600);
+
+        $outcome = Webhook::authorize('{}', 'sha256=wrong', '203.0.113.9');
+
+        $this->assertFalse($outcome['ok']);
+        $this->assertSame(401, $outcome['status']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authorize_does_not_count_a_valid_signature(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        $body = '{"remediation_id":"abc"}';
+        WP_Mock::userFunction('get_transient', ['return' => 19]);
+        WP_Mock::userFunction('set_transient', ['times' => 0]);
+
+        $outcome = Webhook::authorize($body, 'sha256=' . hash_hmac('sha256', $body, 'test-secret'), '203.0.113.9');
+
+        $this->assertTrue($outcome['ok']);
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_authorize_does_not_throttle_when_the_address_is_unknown(): void
+    {
+        define('ADA_REMEDIATION_WEBHOOK_SECRET', 'test-secret');
+        WP_Mock::userFunction('get_transient', ['times' => 0]);
+        WP_Mock::userFunction('set_transient', ['times' => 0]);
+
+        $outcome = Webhook::authorize('{}', 'sha256=wrong', '');
+
+        $this->assertSame(401, $outcome['status']);
         $this->assertConditionsMet();
     }
 
