@@ -20,6 +20,14 @@ class Client {
 	 */
 	public const CONTEXT_FORCE = 'force';
 
+	/**
+	 * How many arguments the WP-Cron callback submit_scheduled() takes. Its hook must be registered
+	 * to accept exactly this many: WP-Cron hands a callback only as many as it accepts, and the
+	 * ones with defaults (the retry number and the due time) would arrive as 0, running a stale
+	 * retry as a first try. A test checks this against the method.
+	 */
+	public const SCHEDULED_SUBMIT_ARGS = 4;
+
 	private const SUBMIT_PATH = '/api/submit-document/';
 
 	private const HTTP_TOO_MANY_REQUESTS = 429;
@@ -65,12 +73,14 @@ class Client {
 	/**
 	 * Submits an attachment's PDF to the remediation pipeline, saying what happened.
 	 *
-	 * @param int   $attachment_id The attachment to submit.
-	 * @param array $context       See submit_attachment().
+	 * @param int           $attachment_id The attachment to submit.
+	 * @param array         $context       See submit_attachment().
+	 * @param callable|null $still_wanted  Optional. Returns false, once the claim is held, if the
+	 *                                     submit is no longer wanted; see run_exclusive().
 	 * @return Submit_Result Refused (nothing changed), rate limited (the pipeline said to wait;
 	 *                       nothing changed), failed, or submitted.
 	 */
-	public static function submit_with_result( int $attachment_id, array $context = array() ): Submit_Result {
+	public static function submit_with_result( int $attachment_id, array $context = array(), ?callable $still_wanted = null ): Submit_Result {
 		if ( ! Plugin::is_pdf( $attachment_id ) ) {
 			return Submit_Result::refused();
 		}
@@ -79,8 +89,80 @@ class Client {
 			$attachment_id,
 			static function () use ( $attachment_id, $context ): Submit_Result {
 				return self::send( $attachment_id, $context );
-			}
+			},
+			$still_wanted
 		);
+	}
+
+	/**
+	 * The WP-Cron callback for a scheduled submit: submits, and if the pipeline said to wait,
+	 * schedules the next try.
+	 *
+	 * A retry event carries its retry number and the time it is due. It runs only if the file is
+	 * still waiting for exactly that event (the retrying badge, stamped with that time). If the
+	 * file was submitted another way meanwhile, or a newer retry replaced this one, it does nothing,
+	 * so there is one retry chain per file however many events were scheduled. The state decides,
+	 * not timing; WP-Cron's own de-duplication only merges identical events close together.
+	 *
+	 * A first try runs only if the file is still queued (or was never marked), so a late event
+	 * can't resubmit a file that has a result, failed, or is waiting for a retry of its own.
+	 *
+	 * The original $context goes with every retry: a limit means the pipeline created nothing, so
+	 * a forced submit that was limited should still be forced when it goes through.
+	 *
+	 * @param int   $attachment_id The attachment to submit.
+	 * @param array $context       See submit_attachment().
+	 * @param int   $retry         Which retry this is, counting from 1; 0 for the first try.
+	 * @param int   $due_at        Unix time this retry was scheduled for; 0 for the first try.
+	 * @return void
+	 */
+	public static function submit_scheduled( int $attachment_id, array $context = array(), int $retry = 0, int $due_at = 0 ): void {
+		// Checked once the claim is held, so two events can't both pass it and both submit.
+		$still_wanted = static function () use ( $attachment_id, $retry, $due_at ): bool {
+			return $retry > 0
+				? Submission_State_Service::is_retry_scheduled_for( $attachment_id, $due_at )
+				: Submission_State_Service::is_awaiting_first_try( $attachment_id );
+		};
+
+		$result = self::submit_with_result( $attachment_id, $context, $still_wanted );
+
+		if ( $result->is_rate_limited() ) {
+			self::retry_later( $attachment_id, $context, $retry + 1, $result );
+		}
+	}
+
+	/**
+	 * Schedules the next try of a rate-limited submit, or marks the file failed once Retry_Policy
+	 * has run out of retries.
+	 *
+	 * @param int           $attachment_id The attachment.
+	 * @param array         $context       The context to submit with again.
+	 * @param int           $retry         The retry being scheduled, counting from 1.
+	 * @param Submit_Result $result        The rate-limited result.
+	 * @return void
+	 */
+	private static function retry_later( int $attachment_id, array $context, int $retry, Submit_Result $result ): void {
+		$delay = Retry_Policy::from_constants()->delay_after( $result, $retry );
+
+		if ( null === $delay ) {
+			self::fail_and_mark( $attachment_id );
+
+			return;
+		}
+
+		$next_try_at = time() + $delay;
+
+		// Stamped before the event exists, so the file never looks abandoned while it waits, and so
+		// the event (which carries this time) finds it is the one the file is waiting for. False
+		// means the pipeline took a job for it meanwhile: nothing is left to retry, and it is not a failure.
+		if ( ! Submission_State_Service::mark_retrying( $attachment_id, $next_try_at ) ) {
+			return;
+		}
+
+		// A file left retrying with no event would look in flight for a while and then never be sent.
+		if ( ! Plugin::schedule_once( Plugin::SUBMIT_ATTACHMENT_HOOK, array( $attachment_id, $context, $retry, $next_try_at ), $next_try_at ) ) {
+			self::fail_and_mark( $attachment_id );
+		}
 	}
 
 	/**
@@ -325,6 +407,7 @@ class Client {
 	 * Whether a URL shares scheme, host and port with ADA_REMEDIATION_API_BASE_URL.
 	 *
 	 * @param string $url The URL to check.
+	 * @return bool
 	 */
 	private static function is_pipeline_origin( string $url ): bool {
 		return self::origin_of( $url ) === self::origin_of( (string) ADA_REMEDIATION_API_BASE_URL );
@@ -334,6 +417,7 @@ class Client {
 	 * A URL's scheme://host:port, lowercased ('' if it has none).
 	 *
 	 * @param string $url The URL to reduce.
+	 * @return string
 	 */
 	private static function origin_of( string $url ): string {
 		$parts = wp_parse_url( $url );
@@ -355,6 +439,7 @@ class Client {
 	 * support that.
 	 *
 	 * @param int $attachment_id The attachment whose submission failed.
+	 * @return void
 	 */
 	public static function mark_submission_failed( int $attachment_id ): void {
 		Submission_State_Service::mark_error( $attachment_id );
@@ -421,6 +506,7 @@ class Client {
 	 * Whether an HTTP status code is a 2xx success.
 	 *
 	 * @param int $status_code The status code to check.
+	 * @return bool
 	 */
 	private static function is_success_status( int $status_code ): bool {
 		return $status_code >= 200 && $status_code < 300;
@@ -433,6 +519,7 @@ class Client {
 	 * @param array  $fields        Form fields as name => value.
 	 * @param string $filename      The uploaded file's name.
 	 * @param string $file_contents The uploaded file's raw contents.
+	 * @return string
 	 */
 	private static function build_multipart_body( string $boundary, array $fields, string $filename, string $file_contents ): string {
 		$body = '';

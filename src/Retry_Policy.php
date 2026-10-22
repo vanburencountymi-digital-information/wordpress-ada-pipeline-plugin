@@ -56,6 +56,18 @@ class Retry_Policy {
 	public const FINAL_RETRY = self::SHORT_RETRIES + 1;
 
 	/**
+	 * The shortest wait taken from the pipeline for a time-period limit. A reset time that has
+	 * passed, or a pipeline that always answers 0, must not make a file retry on every cron run.
+	 */
+	public const MIN_RATE_LIMIT_WAIT_SECONDS = 60;
+
+	/**
+	 * How many times a file waits for a time-period limit to reset before giving up. The pipeline
+	 * names the wait, so this only stops a pipeline that never lets the file through.
+	 */
+	public const MAX_RATE_LIMIT_RETRIES = 20;
+
+	/**
 	 * Seconds between the short retries.
 	 *
 	 * @var int
@@ -114,12 +126,28 @@ class Retry_Policy {
 	}
 
 	/**
-	 * Seconds between the short retries, for a wait that has no better number of its own.
+	 * Seconds to wait before retrying a submit the pipeline rate limited.
 	 *
-	 * @return int
+	 * A time-period limit that names its reset time is waited out: the pipeline knows when. Anything
+	 * else (the account's maximum queued and working, a limit with no wait named, a limit that is
+	 * not recognised such as a proxy's 429) follows the fixed sequence, which ends.
+	 *
+	 * @param Submit_Result $result A rate-limited result.
+	 * @param int           $retry  Which retry this is, counting from 1.
+	 * @return int|null Null once the retries are used up: give up.
 	 */
-	public function short_interval_seconds(): int {
-		return $this->interval;
+	public function delay_after( Submit_Result $result, int $retry ): ?int {
+		$retry_after = $result->retry_after();
+
+		if ( Submit_Result::LIMIT_RATE !== $result->limit_kind() || null === $retry_after ) {
+			return $this->delay_for( $retry );
+		}
+
+		if ( $retry > self::MAX_RATE_LIMIT_RETRIES ) {
+			return null;
+		}
+
+		return max( self::MIN_RATE_LIMIT_WAIT_SECONDS, $retry_after );
 	}
 
 	/**

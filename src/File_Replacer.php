@@ -38,6 +38,7 @@ class File_Replacer {
 	 *
 	 * @param int   $attachment_id The attachment to maybe replace.
 	 * @param array $result        The webhook result array (see Webhook::handle()).
+	 * @return void
 	 */
 	public static function maybe_replace( int $attachment_id, array $result ): void {
 		if ( ! self::is_enabled() ) {
@@ -76,6 +77,8 @@ class File_Replacer {
 
 	/**
 	 * Whether ADA_REMEDIATION_AUTO_REPLACE_FILE is defined and truthy.
+	 *
+	 * @return bool
 	 */
 	private static function is_enabled(): bool {
 		return defined( 'ADA_REMEDIATION_AUTO_REPLACE_FILE' ) && ADA_REMEDIATION_AUTO_REPLACE_FILE;
@@ -86,6 +89,7 @@ class File_Replacer {
 	 *
 	 * @param int   $attachment_id The attachment in question.
 	 * @param array $result        The webhook result array.
+	 * @return bool
 	 */
 	private static function is_suppressed( int $attachment_id, array $result ): bool {
 		return (bool) apply_filters( self::SUPPRESS_FILTER, false, $attachment_id, $result );
@@ -112,6 +116,7 @@ class File_Replacer {
 	 *
 	 * @param int    $attachment_id The attachment that was just replaced.
 	 * @param string $local_path    The attachment's local file path.
+	 * @return bool
 	 */
 	private static function is_reachable_within_backoff( int $attachment_id, string $local_path ): bool {
 		foreach ( self::REACHABILITY_BACKOFF_SECONDS as $seconds ) {
@@ -130,6 +135,7 @@ class File_Replacer {
 	 *
 	 * @param int    $attachment_id The attachment to check.
 	 * @param string $local_path    The attachment's local file path.
+	 * @return bool
 	 */
 	private static function is_reachable( int $attachment_id, string $local_path ): bool {
 		if ( file_exists( $local_path ) ) {
@@ -145,6 +151,7 @@ class File_Replacer {
 	 * Whether an HTTP status code is a 2xx success.
 	 *
 	 * @param int $status_code The status code to check.
+	 * @return bool
 	 */
 	private static function is_success_status( int $status_code ): bool {
 		return $status_code >= 200 && $status_code < 300;
@@ -156,6 +163,7 @@ class File_Replacer {
 	 * @param int    $attachment_id The attachment the warning is about.
 	 * @param array  $result        The webhook result array.
 	 * @param string $message       The warning message.
+	 * @return void
 	 */
 	private static function log_warning( int $attachment_id, array $result, string $message ): void {
 		Remediation_Log::record_warning(

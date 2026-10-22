@@ -3,6 +3,7 @@
 namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Retry_Policy;
+use AdaRemediationClient\Submit_Result;
 use PHPUnit\Framework\TestCase;
 
 class Retry_PolicyTest extends TestCase
@@ -30,6 +31,43 @@ class Retry_PolicyTest extends TestCase
         ];
     }
 
+    /**
+     * @dataProvider rate_limited_delays
+     */
+    public function test_delay_after_waits_out_a_time_period_limit_and_otherwise_follows_the_sequence(
+        Submit_Result $result,
+        int $retry,
+        ?int $expected
+    ): void {
+        $this->assertSame($expected, (new Retry_Policy(300, 3600))->delay_after($result, $retry));
+    }
+
+    public function rate_limited_delays(): array
+    {
+        $rate = static function (?int $wait): Submit_Result {
+            return Submit_Result::rate_limited(Submit_Result::LIMIT_RATE, $wait);
+        };
+        $at_once = Submit_Result::rate_limited(Submit_Result::LIMIT_MAX_AT_ONCE, null);
+
+        return [
+            'time period: the pipeline\'s wait' => [$rate(1800), 1, 1800],
+            'time period: a day, and the retry is not capped by the sequence' => [$rate(86400), 12, 86400],
+            'time period: a wait under a minute is raised to a minute' => [$rate(5), 1, Retry_Policy::MIN_RATE_LIMIT_WAIT_SECONDS],
+            'time period: a wait of 0 is raised to a minute' => [$rate(0), 1, Retry_Policy::MIN_RATE_LIMIT_WAIT_SECONDS],
+            'time period: the last allowed retry' => [$rate(600), Retry_Policy::MAX_RATE_LIMIT_RETRIES, 600],
+            'time period: used up' => [$rate(600), Retry_Policy::MAX_RATE_LIMIT_RETRIES + 1, null],
+            'time period with no wait named: the sequence' => [$rate(null), 1, 300],
+            'time period with no wait named: the final retry' => [$rate(null), 5, 3600],
+            'time period with no wait named: used up' => [$rate(null), 6, null],
+            'at once: the sequence' => [$at_once, 2, 300],
+            'at once: the final retry' => [$at_once, 5, 3600],
+            'at once: used up' => [$at_once, 6, null],
+            'at once: a stray wait is not used' => [Submit_Result::rate_limited(Submit_Result::LIMIT_MAX_AT_ONCE, 9000), 1, 300],
+            'unknown limit (a proxy): the sequence' => [Submit_Result::rate_limited(null, null), 1, 300],
+            'unknown limit: used up' => [Submit_Result::rate_limited(null, null), 6, null],
+        ];
+    }
+
     public function test_the_retry_numbers_match_the_constants(): void
     {
         $policy = new Retry_Policy(300, 3600);
@@ -38,11 +76,6 @@ class Retry_PolicyTest extends TestCase
         $this->assertSame(3600, $policy->delay_for(Retry_Policy::FINAL_RETRY));
         $this->assertNull($policy->delay_for(Retry_Policy::FINAL_RETRY + 1));
         $this->assertSame(Retry_Policy::SHORT_RETRIES + 1, Retry_Policy::FINAL_RETRY);
-    }
-
-    public function test_the_short_interval_is_available_for_a_wait_with_no_better_number(): void
-    {
-        $this->assertSame(300, (new Retry_Policy(300, 3600))->short_interval_seconds());
     }
 
     /**
@@ -54,7 +87,6 @@ class Retry_PolicyTest extends TestCase
 
         $this->assertSame(Retry_Policy::MAX_SECONDS, $policy->delay_for(1));
         $this->assertSame(Retry_Policy::MAX_SECONDS, $policy->delay_for(5));
-        $this->assertSame(Retry_Policy::MAX_SECONDS, $policy->short_interval_seconds());
     }
 
     public function waits_over_the_limit(): array

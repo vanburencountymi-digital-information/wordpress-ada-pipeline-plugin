@@ -53,6 +53,8 @@ class Webhook {
 
 	/**
 	 * Registers the callback REST route.
+	 *
+	 * @return void
 	 */
 	public static function register_routes(): void {
 		register_rest_route(
@@ -114,6 +116,8 @@ class Webhook {
 	/**
 	 * The caller's address. Only REMOTE_ADDR: forwarded headers are caller-supplied, so trusting
 	 * them would let an attacker choose which address gets counted.
+	 *
+	 * @return string
 	 */
 	private static function client_ip(): string {
 		return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
@@ -125,6 +129,7 @@ class Webhook {
 	 *
 	 * @param string      $raw_body         The raw request body the signature was computed over.
 	 * @param string|null $signature_header The request's X-Webhook-Signature header value.
+	 * @return bool
 	 */
 	public static function verify_signature( string $raw_body, ?string $signature_header ): bool {
 		$signature_header = (string) $signature_header;
@@ -235,6 +240,7 @@ class Webhook {
 	 *
 	 * @param int   $attachment_id The attachment the result belongs to.
 	 * @param array $result        The webhook result array (see handle()).
+	 * @return void
 	 */
 	public static function run_result_hooks( int $attachment_id, array $result ): void {
 		try {
@@ -255,6 +261,7 @@ class Webhook {
 	 *
 	 * @param int   $attachment_id The attachment the result belongs to.
 	 * @param array $result        The webhook result array (see handle()).
+	 * @return void
 	 */
 	private static function queue_result_hooks( int $attachment_id, array $result ): void {
 		if ( Plugin::schedule_once( self::APPLY_RESULT_HOOK, array( $attachment_id, $result ) ) ) {
@@ -272,6 +279,7 @@ class Webhook {
 	 * @param int    $status  The HTTP status to respond with.
 	 * @param string $code    A machine-readable error code.
 	 * @param string $message A human-readable error message.
+	 * @return array
 	 */
 	private static function error_outcome( int $status, string $code, string $message ): array {
 		return array(
@@ -331,6 +339,7 @@ class Webhook {
 	 * "deliberately not checked," and both mean "nothing to show" from a badge's perspective.
 	 *
 	 * @param array $data The decoded webhook payload.
+	 * @return string
 	 */
 	private static function derive_badge( array $data ): string {
 		$status = $data['status'] ?? '';
@@ -352,6 +361,7 @@ class Webhook {
 	 * The most severe severity present among a postcheck's failed rules.
 	 *
 	 * @param array $failed_rules The postcheck step's failed_rules array.
+	 * @return string|null
 	 */
 	private static function worst_severity( array $failed_rules ): ?string {
 		$present = array_column( $failed_rules, 'severity' );
@@ -369,6 +379,7 @@ class Webhook {
 	 * Maps a failed-rule severity to a badge color.
 	 *
 	 * @param string|null $severity The worst severity present, or null if none.
+	 * @return string
 	 */
 	private static function badge_for_severity( ?string $severity ): string {
 		switch ( $severity ) {
@@ -389,6 +400,7 @@ class Webhook {
 	 *
 	 * @param array  $data The decoded webhook payload.
 	 * @param string $step The step name to find, e.g. 'precheck' or 'postcheck'.
+	 * @return array|null
 	 */
 	private static function find_step( array $data, string $step ): ?array {
 		foreach ( $data['verification_results'] ?? array() as $result ) {
@@ -405,6 +417,7 @@ class Webhook {
 	 *
 	 * @param array  $data The decoded webhook payload.
 	 * @param string $step The step name to encode, e.g. 'precheck' or 'postcheck'.
+	 * @return string|null
 	 */
 	private static function step_json( array $data, string $step ): ?string {
 		$result = self::find_step( $data, $step );
