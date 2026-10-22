@@ -25,6 +25,14 @@ class Client {
 	private const HTTP_TOO_MANY_REQUESTS = 429;
 
 	/**
+	 * What the pipeline's resets_at must look like: an ISO 8601 date and time with a UTC offset,
+	 * with or without fractional seconds (2026-10-21T17:00:00Z, 2026-10-21T17:00:00.123456+00:00).
+	 * Stricter than DateTimeImmutable, which would also read "tomorrow" or a bare year as a time.
+	 * It ends in \z, not $, because $ would also accept a trailing newline.
+	 */
+	private const ISO_8601_WITH_OFFSET = '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})\z/';
+
+	/**
 	 * The response headers that report the account's limits, keyed by Submit_Result's QUOTA_ keys.
 	 */
 	private const QUOTA_HEADERS = array(
@@ -184,9 +192,8 @@ class Client {
 	 * Seconds until a time-period limit resets, from the first of: the Retry-After header (whole
 	 * seconds; an HTTP date is ignored), the body's retry_after, the body's resets_at.
 	 *
-	 * The body's resets_at should be an ISO 8601 date with a UTC offset, such as
-	 * 2026-10-21T17:00:00Z. One with no offset is read in PHP's default timezone, which
-	 * WordPress sets to UTC.
+	 * The body's resets_at must be an ISO 8601 date with a UTC offset (see ISO_8601_WITH_OFFSET);
+	 * anything else counts as no wait, so a vague value can't produce a wrong one.
 	 *
 	 * @param array $response The 429 response.
 	 * @param array $body     Its decoded JSON body.
@@ -194,20 +201,31 @@ class Client {
 	 *                  Submit_Result::rate_limited() clamps that to no wait.
 	 */
 	private static function read_retry_after( array $response, array $body ): ?int {
-		$seconds = self::whole_number( wp_remote_retrieve_header( $response, 'retry-after' ) );
+		$seconds = Whole_Number::from( wp_remote_retrieve_header( $response, 'retry-after' ) );
 
 		if ( null === $seconds ) {
-			$seconds = self::whole_number( $body['retry_after'] ?? null );
+			$seconds = Whole_Number::from( $body['retry_after'] ?? null );
 		}
 
 		if ( null !== $seconds ) {
 			return $seconds;
 		}
 
-		$resets_at = is_string( $body['resets_at'] ?? null ) ? strtotime( $body['resets_at'] ) : false;
+		$resets_at = $body['resets_at'] ?? null;
+
+		if ( ! is_string( $resets_at ) || 1 !== preg_match( self::ISO_8601_WITH_OFFSET, $resets_at ) ) {
+			return null;
+		}
+
+		try {
+			$timestamp = ( new \DateTimeImmutable( $resets_at ) )->getTimestamp();
+		} catch ( \Exception $e ) {
+			// Right shape but not a real date, such as month 13.
+			return null;
+		}
 
 		// Negative if the date has passed; Submit_Result::rate_limited() turns that into no wait.
-		return false === $resets_at ? null : $resets_at - time();
+		return $timestamp - time();
 	}
 
 	/**
@@ -222,7 +240,7 @@ class Client {
 		$quota = array();
 
 		foreach ( self::QUOTA_HEADERS as $key => $header ) {
-			$value = self::whole_number( wp_remote_retrieve_header( $response, $header ) );
+			$value = Whole_Number::from( wp_remote_retrieve_header( $response, $header ) );
 
 			if ( null !== $value ) {
 				$quota[ $key ] = $value;
@@ -230,20 +248,6 @@ class Client {
 		}
 
 		return $quota;
-	}
-
-	/**
-	 * A non-negative whole number from a header string or a decoded JSON value.
-	 *
-	 * @param mixed $value The raw value.
-	 * @return int|null Null for anything else (a date, a fraction, a negative, an empty header).
-	 */
-	private static function whole_number( $value ): ?int {
-		if ( is_int( $value ) ) {
-			return $value >= 0 ? $value : null;
-		}
-
-		return is_string( $value ) && ctype_digit( $value ) ? (int) $value : null;
 	}
 
 	/**

@@ -816,7 +816,32 @@ class ClientTest extends TestCase
             'rate limit: no wait given' => [[], $rate, Submit_Result::LIMIT_RATE, null],
             'rate limit: a huge wait is capped' => [['retry-after' => '99999999999'], $rate, Submit_Result::LIMIT_RATE, Submit_Result::MAX_RETRY_AFTER_SECONDS],
             'rate limit: a negative body wait is ignored' => [[], '{"limit":"rate_limit","retry_after":-5}', Submit_Result::LIMIT_RATE, null],
-            'rate limit: an unreadable resets_at is ignored' => [[], '{"limit":"rate_limit","resets_at":"soon"}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at that is not ISO 8601 is ignored' => [[], '{"limit":"rate_limit","resets_at":"tomorrow"}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at with a trailing newline is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-10-21T17:00:00Z\\n"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: resets_at with the right shape but no such date is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-13-45T00:00:00Z"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: a bare year is ignored' => [[], '{"limit":"rate_limit","resets_at":"2026"}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at with no UTC offset is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-10-21T17:00:00"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: digits too many for an int are ignored' => [
+                ['retry-after' => '99999999999999999999'],
+                $rate,
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
             'max at once: any wait is ignored' => [
                 ['retry-after' => '60'],
                 '{"limit":"max_at_once","retry_after":60}',
@@ -872,6 +897,35 @@ class ClientTest extends TestCase
         return [
             'ten minutes from now' => [600, 600],
             'already past: no wait' => [-3600, 0],
+        ];
+    }
+
+    /**
+     * @dataProvider resets_at_shapes
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_resets_at_accepts_the_iso_8601_shapes_the_pipeline_can_send(string $format): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 429],
+            'body' => '{"limit":"rate_limit","resets_at":"' . gmdate($format, time() + 600) . '"}',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $this->assertEqualsWithDelta(600, Client::submit_with_result(42)->retry_after(), 5);
+    }
+
+    public function resets_at_shapes(): array
+    {
+        return [
+            'Z' => ['Y-m-d\TH:i:s\Z'],
+            'a +00:00 offset' => ['Y-m-d\TH:i:s+00:00'],
+            'microseconds and Z' => ['Y-m-d\TH:i:s.123456\Z'],
+            'microseconds and an offset' => ['Y-m-d\TH:i:s.123456+00:00'],
         ];
     }
 

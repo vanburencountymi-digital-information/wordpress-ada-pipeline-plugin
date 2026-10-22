@@ -229,7 +229,7 @@ class WebhookTest extends TestCase
 
         $this->expect_result_queued(42, function (array $result) use ($expected_badge): bool {
                 return $result['badge'] === $expected_badge && $result['status'] === 'noncompliant';
-            });
+        });
 
         $outcome = Webhook::handle($payload);
 
@@ -275,7 +275,7 @@ class WebhookTest extends TestCase
 
         $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'dark-green' && $result['status'] === 'compliant';
-            });
+        });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
@@ -301,7 +301,7 @@ class WebhookTest extends TestCase
 
         $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'error' && $result['status'] === 'error';
-            });
+        });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
@@ -327,7 +327,7 @@ class WebhookTest extends TestCase
 
         $this->expect_result_queued(42, function (array $result): bool {
                 return $result['badge'] === 'error' && $result['status'] === 'skipped';
-            });
+        });
 
         $outcome = Webhook::handle($payload);
         $this->assertTrue($outcome['ok']);
