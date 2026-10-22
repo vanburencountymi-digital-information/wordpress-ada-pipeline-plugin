@@ -234,7 +234,7 @@ class PluginTest extends TestCase
         ]);
 
         WP_Mock::expectActionAdded('add_attachment', [Plugin::class, 'maybe_submit_on_upload']);
-        WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_attachment'], 10, 2);
+        WP_Mock::expectActionAdded('ada_remediation_submit_attachment', [Client::class, 'submit_scheduled'], 10, Client::SCHEDULED_SUBMIT_ARGS);
         WP_Mock::expectActionAdded('rest_api_init', [\AdaRemediationClient\Webhook::class, 'register_routes']);
         WP_Mock::expectActionAdded(\AdaRemediationClient\Webhook::APPLY_RESULT_HOOK, [\AdaRemediationClient\Webhook::class, 'run_result_hooks'], 10, 2);
         WP_Mock::expectFilterAdded('manage_media_columns', [\AdaRemediationClient\Media_Library_Badge_Column::class, 'register_column']);
@@ -257,6 +257,17 @@ class PluginTest extends TestCase
             ->with('some_hook', [7, 'x']);
 
         $this->assertSame($expected, Plugin::schedule_once('some_hook', [7, 'x']));
+        $this->assertConditionsMet();
+    }
+
+    public function test_schedule_once_runs_the_event_at_the_given_time(): void
+    {
+        $when = time() + 1200;
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => true])
+            ->with($when, 'some_hook', [7, [], 1]);
+        WP_Mock::userFunction('wp_next_scheduled', ['return' => false]);
+
+        $this->assertTrue(Plugin::schedule_once('some_hook', [7, [], 1], $when));
         $this->assertConditionsMet();
     }
 

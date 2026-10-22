@@ -14,7 +14,7 @@ namespace AdaRemediationClient;
  * submit path (upload trigger, cron, adapters, batch runner) agrees on what "in flight" means.
  *
  * Two pieces of state:
- * - a claim: held only while one request is inside Client::submit_attachment(). It expires by
+ * - a claim: held only while one request is inside Client::submit_with_result(). It expires by
  *   itself, so a request that dies mid-submit can't lock the file. It lives in wp_options, whose
  *   option_name is a unique key, because postmeta has none and add_post_meta( $unique ) is a
  *   SELECT then an INSERT that two simultaneous requests can both pass.
@@ -38,6 +38,7 @@ class Submission_State_Service {
 	private const META_CHECKED_AT       = '_ada_remediation_checked_at';
 
 	public const BADGE_QUEUED      = 'queued';
+	public const BADGE_RETRYING    = 'retrying';
 	public const BADGE_PENDING     = 'pending';
 	public const BADGE_ERROR       = 'error';
 	public const BADGE_DARK_GREEN  = 'dark-green';
@@ -75,8 +76,9 @@ class Submission_State_Service {
 	public const STALE_AFTER_SECONDS = 1800;
 
 	/**
-	 * A merely queued file is waiting for WP-Cron to fire its job (seconds to
-	 * minutes). If it is still queued after this, the job is not going to run.
+	 * A merely queued file is waiting for WP-Cron to fire its job (seconds to minutes), and a
+	 * retrying one for the time of its next try. If it is still waiting this long after that
+	 * time, the job is not going to run.
 	 */
 	public const QUEUED_STALE_AFTER_SECONDS = 600;
 
@@ -93,14 +95,68 @@ class Submission_State_Service {
 	 * @return bool True if the file was marked queued; false if a pending job blocked it.
 	 */
 	public static function mark_queued( int $attachment_id ): bool {
+		return self::mark_waiting( $attachment_id, self::BADGE_QUEUED, time() );
+	}
+
+	/**
+	 * Marks the file as retrying: the pipeline said to wait, and a retry is scheduled. The stamp is
+	 * the time of that retry, not now, so the file stays "in flight" through a wait of minutes to a
+	 * day instead of looking abandoned once QUEUED_STALE_AFTER_SECONDS passes, and so the retry
+	 * event can check it is still the one the file is waiting for (see is_retry_scheduled_for()).
+	 * Like mark_queued(), it does nothing if the pipeline already has a pending job for the file.
+	 *
+	 * @param int $attachment_id The attachment.
+	 * @param int $next_try_at   Unix time the retry is scheduled for.
+	 * @return bool True if the file was marked retrying; false if a pending job blocked it.
+	 */
+	public static function mark_retrying( int $attachment_id, int $next_try_at ): bool {
+		return self::mark_waiting( $attachment_id, self::BADGE_RETRYING, $next_try_at );
+	}
+
+	/**
+	 * Whether the file is still waiting for the retry scheduled for $due_at. A retry event that
+	 * finds it is not (the file was submitted another way, or a newer retry replaced this one)
+	 * must do nothing: that is what keeps one retry chain per file, whatever else was scheduled.
+	 *
+	 * @param int $attachment_id The attachment.
+	 * @param int $due_at        The time the retry event was scheduled for.
+	 * @return bool True if the badge is retrying and its stamp is exactly $due_at.
+	 */
+	public static function is_retry_scheduled_for( int $attachment_id, int $due_at ): bool {
+		return self::BADGE_RETRYING === self::current_badge( $attachment_id )
+			&& self::own_stamp( $attachment_id ) === $due_at;
+	}
+
+	/**
+	 * Whether a first-try event still has work to do: the file is queued for it, or was never marked
+	 * (something scheduled the hook without marking the file). Anything else means the file moved on
+	 * since the event was scheduled: it has a result, failed, or is waiting for a retry of its own.
+	 *
+	 * @param int $attachment_id The attachment.
+	 * @return bool True if the badge is queued or empty.
+	 */
+	public static function is_awaiting_first_try( int $attachment_id ): bool {
+		return in_array( self::current_badge( $attachment_id ), array( '', self::BADGE_QUEUED ), true );
+	}
+
+	/**
+	 * Stamps and badges the file, unless the pipeline has a pending job for it.
+	 *
+	 * @param int    $attachment_id The attachment.
+	 * @param string $badge         BADGE_QUEUED or BADGE_RETRYING.
+	 * @param int    $stamp         The Unix time to record: now, or the time of the next try.
+	 * @return bool True if the file was marked; false if a pending job blocked it.
+	 */
+	private static function mark_waiting( int $attachment_id, string $badge, int $stamp ): bool {
 		if ( self::has_pending_job( $attachment_id ) ) {
-			self::log_skip( $attachment_id, 'the pipeline has a pending job, so it was not queued' );
+			self::log_skip( $attachment_id, 'the pipeline has a pending job, so it was not marked ' . $badge );
 
 			return false;
 		}
 
-		self::record_submitted_at( $attachment_id );
-		update_post_meta( $attachment_id, self::META_BADGE, self::BADGE_QUEUED );
+		// Stamp before badge, for the reason record_submitted_at() gives.
+		self::record_submitted_at( $attachment_id, $stamp );
+		update_post_meta( $attachment_id, self::META_BADGE, $badge );
 
 		return true;
 	}
@@ -109,6 +165,7 @@ class Submission_State_Service {
 	 * Marks the file as accepted by the pipeline and awaiting its webhook.
 	 *
 	 * @param int $attachment_id The attachment.
+	 * @return void
 	 */
 	public static function mark_pending( int $attachment_id ): void {
 		self::record_submitted_at( $attachment_id );
@@ -120,6 +177,7 @@ class Submission_State_Service {
 	 * stamp here would only invite someone to treat error like queued and pending.
 	 *
 	 * @param int $attachment_id The attachment.
+	 * @return void
 	 */
 	public static function mark_error( int $attachment_id ): void {
 		self::mark_result( $attachment_id, self::BADGE_ERROR );
@@ -131,6 +189,7 @@ class Submission_State_Service {
 	 *
 	 * @param int    $attachment_id The attachment.
 	 * @param string $badge         The badge to store.
+	 * @return void
 	 */
 	public static function mark_result( int $attachment_id, string $badge ): void {
 		update_post_meta( $attachment_id, self::META_BADGE, $badge );
@@ -145,6 +204,7 @@ class Submission_State_Service {
 	 * @param string      $remediation_id The pipeline's id for the job.
 	 * @param string|null $content_hash   The pipeline's document_id, if it sent one.
 	 * @param string|null $version        The pipeline version, if it sent one.
+	 * @return void
 	 */
 	public static function mark_submitted( int $attachment_id, string $remediation_id, ?string $content_hash = null, ?string $version = null ): void {
 		self::mark_pending( $attachment_id );
@@ -161,6 +221,7 @@ class Submission_State_Service {
 	 * @param string      $remediation_id The pipeline's id for the job.
 	 * @param string|null $content_hash   The pipeline's document_id, if it sent one.
 	 * @param string|null $version        The pipeline version, if it sent one.
+	 * @return void
 	 */
 	public static function record_submission( int $attachment_id, string $remediation_id, ?string $content_hash = null, ?string $version = null ): void {
 		update_post_meta( $attachment_id, self::META_REMEDIATION_ID, $remediation_id );
@@ -234,6 +295,7 @@ class Submission_State_Service {
 	 *
 	 * @param int    $attachment_id  The attachment.
 	 * @param string $remediation_id The job whose result was applied.
+	 * @return void
 	 */
 	public static function mark_applied( int $attachment_id, string $remediation_id ): void {
 		update_post_meta( $attachment_id, self::META_APPLIED_ID, $remediation_id );
@@ -244,6 +306,7 @@ class Submission_State_Service {
 	 *
 	 * @param int    $attachment_id The attachment.
 	 * @param string $checked_at    The time, as a MySQL datetime.
+	 * @return void
 	 */
 	public static function mark_checked( int $attachment_id, string $checked_at ): void {
 		update_post_meta( $attachment_id, self::META_CHECKED_AT, $checked_at );
@@ -266,18 +329,25 @@ class Submission_State_Service {
 	 * badge (it is the scheduled job) must not block it, and a self-block here would stop every
 	 * queued submit. Callers outside this class never see the claim, so they can't skip it.
 	 *
-	 * @param int      $attachment_id The attachment.
-	 * @param callable $send          Does the submit and returns whether it succeeded.
-	 * @return bool False if another submit is running or the pipeline has a pending job for the
-	 *              file (nothing was changed); otherwise what $send returned.
+	 * @param int           $attachment_id The attachment.
+	 * @param callable      $send          Does the submit and returns its Submit_Result.
+	 * @param callable|null $still_wanted  Optional. Called with no arguments once the claim is held;
+	 *                                     returns false if the submit is no longer wanted (a retry
+	 *                                     whose file has moved on). Checked here, not before the
+	 *                                     claim, so two events can't both pass it and then both submit.
+	 * @return Submit_Result Refused if another submit is running, the pipeline has a pending job for
+	 *                       the file, or $still_wanted says no (nothing was changed); otherwise what
+	 *                       $send returned.
+	 * @throws \UnexpectedValueException If $send returns anything but a Submit_Result. The claim
+	 *                                   is still released.
 	 */
-	public static function run_exclusive( int $attachment_id, callable $send ): bool {
+	public static function run_exclusive( int $attachment_id, callable $send, ?callable $still_wanted = null ): Submit_Result {
 		$token = self::claim( $attachment_id );
 
 		if ( null === $token ) {
 			self::log_skip( $attachment_id, 'another submit holds the claim' );
 
-			return false;
+			return Submit_Result::refused();
 		}
 
 		try {
@@ -285,10 +355,23 @@ class Submission_State_Service {
 			if ( self::has_pending_job( $attachment_id ) ) {
 				self::log_skip( $attachment_id, 'the pipeline has a pending job' );
 
-				return false;
+				return Submit_Result::refused();
 			}
 
-			return (bool) $send();
+			if ( null !== $still_wanted && ! $still_wanted() ) {
+				self::log_skip( $attachment_id, 'the file is no longer waiting for this submit' );
+
+				return Submit_Result::refused();
+			}
+
+			$result = $send();
+
+			// Said outright, not left to a bare TypeError: whoever passed the callback needs to know.
+			if ( ! $result instanceof Submit_Result ) {
+				throw new \UnexpectedValueException( 'The submit callback must return a Submit_Result.' );
+			}
+
+			return $result;
 		} finally {
 			self::release( $attachment_id, $token );
 		}
@@ -300,6 +383,7 @@ class Submission_State_Service {
 	 *
 	 * @param int    $attachment_id The attachment.
 	 * @param string $reason        Why the submit was refused.
+	 * @return void
 	 */
 	private static function log_skip( int $attachment_id, string $reason ): void {
 		// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- no plugin logger; the host's PHP error log is where this is looked for.
@@ -365,6 +449,7 @@ class Submission_State_Service {
 	 *
 	 * @param int    $attachment_id The attachment.
 	 * @param string $token         The token claim() returned.
+	 * @return void
 	 */
 	private static function release( int $attachment_id, string $token ): void {
 		global $wpdb;
@@ -402,8 +487,8 @@ class Submission_State_Service {
 
 	/**
 	 * Whether any submission is out for this file: a submit is running, the file is queued
-	 * for cron, or the pipeline is working on it. For adapters and the batch runner to check
-	 * before queueing a job; submit_attachment() itself uses run_exclusive().
+	 * for cron or waiting to retry, or the pipeline is working on it. For adapters and the batch runner to check
+	 * before queueing a job; Client::submit_with_result() itself uses run_exclusive().
 	 *
 	 * @param int $attachment_id The attachment.
 	 * @return bool True if a new submit for this file would collide with one already out.
@@ -411,32 +496,48 @@ class Submission_State_Service {
 	public static function is_in_flight( int $attachment_id ): bool {
 		return self::is_claimed( $attachment_id )
 			|| self::has_pending_job( $attachment_id )
-			|| self::in_progress_within( $attachment_id, self::BADGE_QUEUED, self::QUEUED_STALE_AFTER_SECONDS );
+			|| self::in_progress_within( $attachment_id, self::BADGE_QUEUED, self::QUEUED_STALE_AFTER_SECONDS )
+			|| self::in_progress_within( $attachment_id, self::BADGE_RETRYING, self::QUEUED_STALE_AFTER_SECONDS );
 	}
 
 	/**
-	 * Records that the file was just queued or submitted. Callers write this before the badge: a
-	 * badge with no recent stamp is never treated as in flight, while a stamp with no badge is
-	 * harmless, so a reader between the two writes (or a crash) can't see a half-marked file as free.
+	 * Records when the file was queued or submitted, or when its next retry is due. Callers write
+	 * this before the badge: a badge with no recent stamp is never treated as in flight, so a reader
+	 * between the two writes (or a crash) can't see a half-marked file as free. A stamp with the old
+	 * badge is harmless when the stamp is now. A retry's stamp is a future time, so a crash between
+	 * the two writes can leave a queued file counting as in flight, with no retry scheduled, until
+	 * then. That narrow window is accepted for now (DIC-2312 decides the guarded entry point).
 	 *
-	 * @param int $attachment_id The attachment.
+	 * @param int      $attachment_id The attachment.
+	 * @param int|null $at            Unix time to record; now if omitted.
+	 * @return void
 	 */
-	private static function record_submitted_at( int $attachment_id ): void {
-		update_post_meta( $attachment_id, self::META_SUBMITTED_AT, time() );
+	private static function record_submitted_at( int $attachment_id, ?int $at = null ): void {
+		update_post_meta( $attachment_id, self::META_SUBMITTED_AT, $at ?? time() );
 	}
 
 	/**
-	 * When the file was last queued or submitted (0 if never), from this plugin's stamp or the
-	 * adapter's legacy one, whichever is newer.
+	 * When the file was last queued or submitted, or when its next retry is due (0 if never), from
+	 * this plugin's stamp or the adapter's legacy one, whichever is newer.
 	 *
 	 * @param int $attachment_id The attachment.
 	 * @return int Unix time of the newer of the two stamps, or 0 if the file was never queued or submitted.
 	 */
 	private static function submitted_at( int $attachment_id ): int {
 		return max(
-			(int) get_post_meta( $attachment_id, self::META_SUBMITTED_AT, true ),
+			self::own_stamp( $attachment_id ),
 			(int) get_post_meta( $attachment_id, self::LEGACY_META_SUBMITTED_AT, true )
 		);
+	}
+
+	/**
+	 * This plugin's own stamp, without the adapter's legacy one: what record_submitted_at() wrote.
+	 *
+	 * @param int $attachment_id The attachment.
+	 * @return int Unix time, 0 if never written.
+	 */
+	private static function own_stamp( int $attachment_id ): int {
+		return (int) get_post_meta( $attachment_id, self::META_SUBMITTED_AT, true );
 	}
 
 	/**

@@ -3,6 +3,7 @@
 namespace AdaRemediationClient\Tests;
 
 use AdaRemediationClient\Client;
+use AdaRemediationClient\Submit_Result;
 use Mockery;
 use WP_Mock;
 use WP_Mock\Tools\TestCase;
@@ -697,6 +698,692 @@ class ClientTest extends TestCase
         $this->assertConditionsMet();
     }
 
+    public function test_submit_with_result_says_refused_for_a_non_pdf(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'image/jpeg']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertSame(Submit_Result::REFUSED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    public function test_submit_with_result_says_refused_while_a_claim_is_held(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $this->mock_wpdb(0, (time() - 5) . '|other', false);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+
+        $this->assertSame(Submit_Result::REFUSED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_with_result_says_failed_when_no_file_could_be_read(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => false]);
+        WP_Mock::userFunction('wp_get_attachment_url', ['return' => 'https://example.org/missing.pdf']);
+        WP_Mock::userFunction('wp_remote_get', [
+            'return' => ['errors' => ['http_request_failed' => ['Could not resolve host']]],
+        ]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+        $this->expect_failure_badge_write(42);
+
+        $this->assertSame(Submit_Result::FAILED, Client::submit_with_result(42)->outcome());
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_with_result_says_submitted_when_the_pipeline_accepts_the_file(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+        WP_Mock::userFunction('wp_remote_post', [
+            'times' => 1,
+            'return' => ['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY],
+        ]);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertSame(Submit_Result::SUBMITTED, $result->outcome());
+        $this->assertTrue($result->is_submitted());
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @dataProvider rate_limited_responses
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_is_rate_limited_not_failed_and_leaves_the_badge_and_log_alone(
+        array $headers,
+        string $body,
+        ?string $kind,
+        ?int $retry_after
+    ): void {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'headers' => $headers, 'body' => $body]);
+
+        // Nothing may be written: no badge (update_post_meta) and no log row (insert on the shared $wpdb mock).
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $GLOBALS['wpdb']->prefix = 'wp_';
+        $GLOBALS['wpdb']->shouldReceive('insert')->never();
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_rate_limited());
+        $this->assertFalse($result->is_failed());
+        $this->assertSame($kind, $result->limit_kind());
+        $this->assertSame($retry_after, $result->retry_after());
+        $this->assertConditionsMet();
+    }
+
+    public function rate_limited_responses(): array
+    {
+        $rate = '{"limit":"rate_limit"}';
+
+        return [
+            'rate limit: the Retry-After header' => [['retry-after' => '120'], $rate, Submit_Result::LIMIT_RATE, 120],
+            'rate limit: a bad header falls back to the body' => [
+                ['retry-after' => 'Wed, 21 Oct 2026 07:28:00 GMT'],
+                '{"limit":"rate_limit","retry_after":300}',
+                Submit_Result::LIMIT_RATE,
+                300,
+            ],
+            'rate limit: no wait given' => [[], $rate, Submit_Result::LIMIT_RATE, null],
+            'rate limit: a huge wait is capped' => [['retry-after' => '99999999999'], $rate, Submit_Result::LIMIT_RATE, Submit_Result::MAX_RETRY_AFTER_SECONDS],
+            'rate limit: a negative body wait is ignored' => [[], '{"limit":"rate_limit","retry_after":-5}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at that is not ISO 8601 is ignored' => [[], '{"limit":"rate_limit","resets_at":"tomorrow"}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at with a trailing newline is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-10-21T17:00:00Z\\n"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: resets_at with the right shape but no such date is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-13-45T00:00:00Z"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: a bare year is ignored' => [[], '{"limit":"rate_limit","resets_at":"2026"}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: resets_at with no UTC offset is ignored' => [
+                [],
+                '{"limit":"rate_limit","resets_at":"2026-10-21T17:00:00"}',
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'rate limit: digits too many for an int are ignored' => [
+                ['retry-after' => '99999999999999999999'],
+                $rate,
+                Submit_Result::LIMIT_RATE,
+                null,
+            ],
+            'max at once: any wait is ignored' => [
+                ['retry-after' => '60'],
+                '{"limit":"max_at_once","retry_after":60}',
+                Submit_Result::LIMIT_MAX_AT_ONCE,
+                null,
+            ],
+            'unknown limit: any wait is ignored' => [['retry-after' => '60'], '{"limit":"other"}', null, null],
+            'no body at all (a proxy)' => [['retry-after' => '60'], '', null, null],
+            'a body that is not an object' => [[], '"slow down"', null, null],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_is_false_for_a_429(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $this->assertFalse(Client::submit_attachment(42));
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @dataProvider resets_at_offsets
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_resets_at_date_becomes_seconds_from_now(int $offset, int $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $resets_at = gmdate('Y-m-d\TH:i:s\Z', time() + $offset);
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 429],
+            'body' => '{"limit":"rate_limit","resets_at":"' . $resets_at . '"}',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertEqualsWithDelta($expected, $result->retry_after(), 5);
+    }
+
+    public function resets_at_offsets(): array
+    {
+        return [
+            'ten minutes from now' => [600, 600],
+            'already past: no wait' => [-3600, 0],
+        ];
+    }
+
+    /**
+     * @dataProvider resets_at_shapes
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_resets_at_accepts_the_iso_8601_shapes_the_pipeline_can_send(string $format): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 429],
+            'body' => '{"limit":"rate_limit","resets_at":"' . gmdate($format, time() + 600) . '"}',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $this->assertEqualsWithDelta(600, Client::submit_with_result(42)->retry_after(), 5);
+    }
+
+    public function resets_at_shapes(): array
+    {
+        return [
+            'Z' => ['Y-m-d\TH:i:s\Z'],
+            'a +00:00 offset' => ['Y-m-d\TH:i:s+00:00'],
+            'microseconds and Z' => ['Y-m-d\TH:i:s.123456\Z'],
+            'microseconds and an offset' => ['Y-m-d\TH:i:s.123456+00:00'],
+        ];
+    }
+
+    /**
+     * @dataProvider quota_headers
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_ratelimit_headers_are_read_from_a_success_response(array $headers, array $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 201],
+            'headers' => $headers,
+            'body' => self::SUBMIT_RESPONSE_BODY,
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_submitted());
+        $this->assertSame($expected, $result->quota());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_ratelimit_headers_are_kept_on_a_failed_response_too(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 500],
+            'headers' => ['x-ratelimit-remaining' => '3'],
+            'body' => 'oops',
+        ]);
+        $this->expect_failure_badge_write(42);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_failed());
+        $this->assertSame([Submit_Result::QUOTA_REMAINING => 3], $result->quota());
+        $this->assertConditionsMet();
+    }
+
+    public function quota_headers(): array
+    {
+        return [
+            'all three' => [
+                ['x-ratelimit-limit' => '100', 'x-ratelimit-remaining' => '0', 'x-ratelimit-reset' => '1792569600'],
+                [
+                    Submit_Result::QUOTA_LIMIT => 100,
+                    Submit_Result::QUOTA_REMAINING => 0,
+                    Submit_Result::QUOTA_RESET => 1792569600,
+                ],
+            ],
+            'only some' => [['x-ratelimit-remaining' => '7'], [Submit_Result::QUOTA_REMAINING => 7]],
+            'not whole numbers are left out' => [
+                ['x-ratelimit-limit' => 'many', 'x-ratelimit-remaining' => '-1', 'x-ratelimit-reset' => '1.5'],
+                [],
+            ],
+            'none' => [[], []],
+        ];
+    }
+
+    /**
+     * Gives the PDF a readable local file and has wp_remote_post() answer with $response.
+     */
+    private function mock_local_pdf_and_post(array $response): void
+    {
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 1, 'return' => $response]);
+    }
+
+    /**
+     * @dataProvider at_once_retries
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_that_hits_the_maximum_at_once_schedules_the_next_try(int $retry, int $delay): void
+    {
+        $due = time() - 30;
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf($retry > 0 ? $due : null);
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        $writes = $this->capture_meta_writes();
+        // The event carries its retry number and the time it is due, which is also the file's stamp.
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => true])->with(
+            $this->near(time() + $delay),
+            'ada_remediation_submit_attachment',
+            Mockery::on(function ($args) use ($retry, $delay): bool {
+                return 4 === count($args) && 42 === $args[0] && [] === $args[1] && $retry + 1 === $args[2]
+                    && abs($args[3] - (time() + $delay)) <= 5;
+            })
+        );
+
+        Client::submit_scheduled(42, [], $retry, $retry > 0 ? $due : 0);
+
+        // Stamped with the time of the next try, then badged retrying; no error badge, no log row.
+        $this->assertCount(2, $writes);
+        $this->assertSame([42, '_ada_remediation_submitted_at'], array_slice($writes[0], 0, 2));
+        $this->assertEqualsWithDelta(time() + $delay, $writes[0][2], 5);
+        $this->assertSame([42, '_ada_remediation_badge', 'retrying'], $writes[1]);
+        $this->assertConditionsMet();
+    }
+
+    public function at_once_retries(): array
+    {
+        return [
+            'first try gets the 1st retry' => [0, 1200],
+            'the 3rd retry follows the 2nd' => [2, 1200],
+            'the 4th retry is the last short one' => [3, 1200],
+            'the 5th retry is the long wait' => [4, 7200],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_that_hits_a_time_period_limit_waits_for_the_reset(): void
+    {
+        $due = time() - 30;
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf($due);
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 429],
+            'headers' => ['retry-after' => '5400'],
+            'body' => '{"limit":"rate_limit"}',
+        ]);
+        $this->capture_meta_writes();
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => true])->with(
+            $this->near(time() + 5400),
+            'ada_remediation_submit_attachment',
+            Mockery::on(function ($args): bool {
+                return 8 === $args[2] && abs($args[3] - (time() + 5400)) <= 5;
+            })
+        );
+
+        Client::submit_scheduled(42, [], 7, $due);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_retry_keeps_the_context_the_submit_was_scheduled_with(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        $this->capture_meta_writes();
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => true])->with(
+            Mockery::type('integer'),
+            'ada_remediation_submit_attachment',
+            Mockery::on(function ($args): bool {
+                return ['force' => true] === $args[1];
+            })
+        );
+
+        Client::submit_scheduled(42, ['force' => true]);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_marks_the_file_failed_once_the_retries_are_used_up(): void
+    {
+        $due = time() - 30;
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf($due);
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        // The 5th retry was the last: this is the 6th try, so there is no 7th.
+        $this->expect_failure_badge_write(42);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42, [], 5, $due);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_marks_the_file_failed_if_the_retry_cannot_be_scheduled(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 1, 'return' => false]);
+        WP_Mock::userFunction('wp_next_scheduled', ['return' => false]);
+        // The stamp and the retrying badge are written first, then the failure replaces the badge.
+        // The specific expectation comes first: Mockery uses the first one that matches.
+        $this->expect_failure_badge_write(42);
+        WP_Mock::userFunction('update_post_meta', ['return' => true]);
+
+        Client::submit_scheduled(42);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_leaves_the_file_alone_if_the_pipeline_took_a_job_for_it_meanwhile(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        // No pending job when the submit starts; one by the time the retry would be stamped.
+        $badge_reads = 0;
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use (&$badge_reads) {
+                if ('_ada_remediation_badge' === $key) {
+                    // Reads: the claim's pending check, the first-try check, then the retry's own check.
+                    return ++$badge_reads > 2 ? 'pending' : '';
+                }
+
+                return '_ada_remediation_submitted_at' === $key ? time() - 5 : '';
+            },
+        ]);
+        $this->mock_wpdb(1);
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        // Not stamped, not rescheduled, and not marked failed: something else has the file now.
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_scheduled_submit_the_pipeline_accepts_schedules_nothing_more(): void
+    {
+        $due = time() - 30;
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_claimable_pdf($due);
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 201],
+            'body' => self::SUBMIT_RESPONSE_BODY,
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42, [], 2, $due);
+
+        $this->assertConditionsMet();
+    }
+
+    public function test_the_cron_hook_is_told_to_accept_every_argument_submit_scheduled_takes(): void
+    {
+        $this->assertSame(
+            (new \ReflectionMethod(Client::class, 'submit_scheduled'))->getNumberOfParameters(),
+            Client::SCHEDULED_SUBMIT_ARGS
+        );
+    }
+
+    public function test_a_scheduled_submit_that_is_refused_schedules_nothing(): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'image/jpeg']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * A retry event whose file has moved on must do nothing at all: not submit, not write, not
+     * schedule. This is what keeps one retry chain per file.
+     *
+     * @dataProvider files_that_moved_on
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_retry_does_nothing_if_the_file_is_no_longer_waiting_for_it(string $badge, ?int $stamp): void
+    {
+        $due = 1800000000;
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use ($badge, $stamp) {
+                if ('_ada_remediation_badge' === $key) {
+                    return $badge;
+                }
+
+                return '_ada_remediation_submitted_at' === $key && null !== $stamp ? $stamp : '';
+            },
+        ]);
+        // The check runs once the claim is held, so the claim is taken and released around it.
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $wpdb = $this->mock_wpdb(1, '', false);
+        $wpdb->shouldReceive('delete')->once();
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42, ['force' => true], 3, $due);
+
+        $this->assertConditionsMet();
+    }
+
+    public function files_that_moved_on(): array
+    {
+        $due = 1800000000;
+
+        return [
+            'submitted another way: pending' => ['pending', $due],
+            'finished' => ['dark-green', $due],
+            'failed' => ['error', $due],
+            'queued again' => ['queued', $due],
+            'a newer retry replaced this one' => ['retrying', $due + 1200],
+            'retrying but stamped by something older' => ['retrying', $due - 5],
+            'no badge' => ['', $due],
+            'retrying with no stamp' => ['retrying', null],
+        ];
+    }
+
+    /**
+     * A first-try event does nothing for a file that moved on since it was scheduled.
+     *
+     * @dataProvider files_that_are_not_awaiting_a_first_try
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_first_try_does_nothing_if_the_file_is_no_longer_waiting_for_it(string $badge): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use ($badge) {
+                return '_ada_remediation_badge' === $key ? $badge : '';
+            },
+        ]);
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $wpdb = $this->mock_wpdb(1, '', false);
+        $wpdb->shouldReceive('delete')->once();
+        WP_Mock::userFunction('wp_remote_post', ['times' => 0]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        WP_Mock::userFunction('wp_schedule_single_event', ['times' => 0]);
+
+        Client::submit_scheduled(42);
+
+        $this->assertConditionsMet();
+    }
+
+    public function files_that_are_not_awaiting_a_first_try(): array
+    {
+        return [
+            'compliant' => ['dark-green'],
+            'minor issues' => ['light-green'],
+            'major issues' => ['yellow'],
+            'critical issues' => ['red'],
+            'failed' => ['error'],
+            'waiting for a retry of its own' => ['retrying'],
+            'an adapter\'s own badge' => ['county-custom'],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_first_try_runs_for_a_file_that_is_queued_for_it(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) {
+                if ('_ada_remediation_badge' === $key) {
+                    return 'queued';
+                }
+
+                return '_ada_remediation_submitted_at' === $key ? time() - 5 : '';
+            },
+        ]);
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        $this->mock_wpdb(1);
+        $this->mock_local_pdf_and_post(['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        Client::submit_scheduled(42);
+
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_first_try_does_not_wait_for_a_retry_state(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 201], 'body' => self::SUBMIT_RESPONSE_BODY]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        // An event scheduled by an upload carries no retry number or due time.
+        $this->assertNull(Client::submit_scheduled(42));
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * Records what update_post_meta() is asked to write, as [id, key, value] rows.
+     */
+    private function capture_meta_writes(): \ArrayObject
+    {
+        $writes = new \ArrayObject();
+        WP_Mock::userFunction('update_post_meta', [
+            'return' => static function ($id, $key, $value) use ($writes): bool {
+                $writes->append([$id, $key, $value]);
+
+                return true;
+            },
+        ]);
+
+        return $writes;
+    }
+
+    private function near(int $expected): \Mockery\Matcher\Closure
+    {
+        return Mockery::on(static function ($time) use ($expected): bool {
+            return is_int($time) && abs($time - $expected) <= 5;
+        });
+    }
+
     private function define_config_constants(): void
     {
         define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
@@ -734,6 +1421,12 @@ class ClientTest extends TestCase
                 return $response['body'] ?? '';
             },
         ]);
+        // Like core: the value as sent, or '' when the header is missing.
+        WP_Mock::userFunction('wp_remote_retrieve_header', [
+            'return' => static function ($response, string $header) {
+                return $response['headers'][$header] ?? '';
+            },
+        ]);
     }
 
     /**
@@ -741,11 +1434,33 @@ class ClientTest extends TestCase
      */
     private function mock_free_pdf(): void
     {
-        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
-        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
-        WP_Mock::userFunction('get_post_meta', ['return' => '']);
+        $this->mock_claimable_pdf();
         WP_Mock::userFunction('update_post_meta')
             ->with(42, '_ada_remediation_submitted_at', Mockery::type('integer'));
+    }
+
+    /**
+     * The same, but leaves update_post_meta() to the test, to inspect what is written.
+     *
+     * @param int|null $retry_due_at If given, the file is already retrying, due at this time.
+     */
+    private function mock_claimable_pdf(?int $retry_due_at = null): void
+    {
+        WP_Mock::userFunction('get_post_mime_type', ['return' => 'application/pdf']);
+        WP_Mock::userFunction('wp_generate_uuid4', ['return' => 'uuid']);
+        WP_Mock::userFunction('get_post_meta', [
+            'return' => static function ($id, $key) use ($retry_due_at) {
+                if (null === $retry_due_at) {
+                    return '';
+                }
+
+                if ('_ada_remediation_badge' === $key) {
+                    return 'retrying';
+                }
+
+                return '_ada_remediation_submitted_at' === $key ? $retry_due_at : '';
+            },
+        ]);
         $this->mock_wpdb(1);
     }
 

@@ -42,6 +42,23 @@ so the Media Library always serves the fixed version. Leave this off if you'd ra
 manually before replacing anything, or if your site has a more specific integration that handles
 file replacement itself (see "For developers" below).
 
+```php
+define('ADA_REMEDIATION_RETRY_INTERVAL_SECONDS', 1200);       // default 1200 (20 minutes)
+define('ADA_REMEDIATION_RETRY_FINAL_INTERVAL_SECONDS', 7200); // default 7200 (2 hours)
+```
+
+If you've hit your pipeline usage limit because too many files are in progress at once, the plugin
+tries again 4 times, waiting the first number of seconds each time, then once more after the second
+number. If that fails too, the file shows as failed. If the limit is for a period of time (such as
+files per day), the plugin waits until the pipeline says it resets.
+
+- **First number:** about as long as the pipeline takes to start its next batch of files. 20 minutes
+  suits a pipeline that runs every 15 to 20 minutes.
+- **Second number:** long enough for your longest document. 2 hours covers most.
+
+Leave both out to use the defaults. A number above one day (86400) counts as one day. Anything
+that isn't a whole number above zero is ignored.
+
 ## Usage
 
 Upload a PDF through the normal Media Library. A colored dot appears in the "ADA Remediation
@@ -50,6 +67,7 @@ Status" column, updating automatically as the file moves through checking:
 | Color | Meaning |
 |---|---|
 | ⚪ Light blue | Queued — waiting to be sent to the pipeline |
+| 🟣 Purple | Retrying — you've hit your pipeline usage limit; the plugin will try again automatically |
 | 🔵 Blue | In progress — the pipeline is checking/remediating it |
 | 🟢 Dark green | Compliant |
 | 🟢 Light green | Remediated, minor issues remain |

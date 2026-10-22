@@ -26,6 +26,11 @@ class Plugin {
 	public const PDF_MIME_TYPE = 'application/pdf';
 
 	/**
+	 * WordPress's default priority for a hook callback.
+	 */
+	private const DEFAULT_PRIORITY = 10;
+
+	/**
 	 * The pipeline issues 64-character hex secrets; anything much shorter is a placeholder or a
 	 * typo. An empty HMAC key is worst of all: anyone can compute a valid signature with it.
 	 */
@@ -33,6 +38,8 @@ class Plugin {
 
 	/**
 	 * Whether every required wp-config.php constant is defined and usable.
+	 *
+	 * @return bool
 	 */
 	public static function is_configured(): bool {
 		return array() === self::configuration_problems();
@@ -68,6 +75,8 @@ class Plugin {
 	/**
 	 * Tells an administrator why the plugin is switched off, but only when someone has started
 	 * configuring it: a site with none of the constants isn't meant to run this plugin at all.
+	 *
+	 * @return void
 	 */
 	public static function render_configuration_notice(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -83,6 +92,8 @@ class Plugin {
 
 	/**
 	 * Whether any required constant has been defined at all.
+	 *
+	 * @return bool
 	 */
 	private static function is_partly_configured(): bool {
 		foreach ( self::REQUIRED_CONSTANTS as $constant ) {
@@ -96,6 +107,8 @@ class Plugin {
 
 	/**
 	 * Registers every hook this plugin needs, once configured.
+	 *
+	 * @return void
 	 */
 	public static function boot(): void {
 		if ( ! self::is_configured() ) {
@@ -109,13 +122,13 @@ class Plugin {
 		Remediation_Log::maybe_install();
 
 		add_action( 'add_attachment', array( self::class, 'maybe_submit_on_upload' ) );
-		// WP-Cron passes event args positionally, so accepting two is what lets a force context
-		// reach submit_attachment(); events scheduled with only the ID still work (default context).
-		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_attachment' ), 10, 2 );
+		// The argument count must match the method: see Client::SCHEDULED_SUBMIT_ARGS. Events scheduled
+		// with only the ID still work.
+		add_action( self::SUBMIT_ATTACHMENT_HOOK, array( Client::class, 'submit_scheduled' ), self::DEFAULT_PRIORITY, Client::SCHEDULED_SUBMIT_ARGS );
 		add_action( 'rest_api_init', array( Webhook::class, 'register_routes' ) );
-		add_action( Webhook::APPLY_RESULT_HOOK, array( Webhook::class, 'run_result_hooks' ), 10, 2 );
+		add_action( Webhook::APPLY_RESULT_HOOK, array( Webhook::class, 'run_result_hooks' ), self::DEFAULT_PRIORITY, 2 );
 		add_filter( 'manage_media_columns', array( Media_Library_Badge_Column::class, 'register_column' ) );
-		add_action( 'manage_media_custom_column', array( Media_Library_Badge_Column::class, 'render_column' ), 10, 2 );
+		add_action( 'manage_media_custom_column', array( Media_Library_Badge_Column::class, 'render_column' ), self::DEFAULT_PRIORITY, 2 );
 		add_action( Webhook::RESULT_HOOK, array( File_Replacer::class, 'maybe_replace' ), File_Replacer::HOOK_PRIORITY, 2 );
 	}
 
@@ -126,6 +139,7 @@ class Plugin {
 	 * person's own upload request. Deferring it means nobody's upload waits on it.
 	 *
 	 * @param int $attachment_id The newly uploaded attachment's post ID.
+	 * @return void
 	 */
 	public static function maybe_submit_on_upload( int $attachment_id ): void {
 		if ( self::should_auto_submit( $attachment_id ) && Submission_State_Service::mark_queued( $attachment_id ) ) {
@@ -137,16 +151,17 @@ class Plugin {
 	}
 
 	/**
-	 * Schedules a one-off WP-Cron event to run the next time cron does.
+	 * Schedules a one-off WP-Cron event, to run the next time cron does unless a time is given.
 	 *
-	 * @param string $hook The action to fire.
-	 * @param array  $args The action's arguments.
+	 * @param string   $hook      The action to fire.
+	 * @param array    $args      The action's arguments.
+	 * @param int|null $timestamp Unix time to run it; now if omitted.
 	 * @return bool True if it is scheduled, or an identical event already is (that one will run);
 	 *              false if it could not be scheduled.
 	 */
-	public static function schedule_once( string $hook, array $args ): bool {
+	public static function schedule_once( string $hook, array $args, ?int $timestamp = null ): bool {
 		// WP-Cron also returns false when an identical event is already waiting.
-		return (bool) wp_schedule_single_event( time(), $hook, $args ) || false !== wp_next_scheduled( $hook, $args );
+		return (bool) wp_schedule_single_event( $timestamp ?? time(), $hook, $args ) || false !== wp_next_scheduled( $hook, $args );
 	}
 
 	/**

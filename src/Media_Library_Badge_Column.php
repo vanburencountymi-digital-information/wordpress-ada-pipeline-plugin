@@ -21,6 +21,7 @@ class Media_Library_Badge_Column {
 	 */
 	public const BADGE_COLORS = array(
 		Submission_State_Service::BADGE_QUEUED      => '#b0c4de',
+		Submission_State_Service::BADGE_RETRYING    => '#9370db',
 		Submission_State_Service::BADGE_PENDING     => '#4169e1',
 		Submission_State_Service::BADGE_DARK_GREEN  => '#006400',
 		Submission_State_Service::BADGE_LIGHT_GREEN => '#90ee90',
@@ -34,6 +35,7 @@ class Media_Library_Badge_Column {
 	 */
 	public const TOOLTIP_LABELS = array(
 		Submission_State_Service::BADGE_QUEUED      => 'Queued for submission',
+		Submission_State_Service::BADGE_RETRYING    => 'You\'ve hit your pipeline usage limit; will retry automatically',
 		Submission_State_Service::BADGE_PENDING     => 'Remediation in progress',
 		Submission_State_Service::BADGE_DARK_GREEN  => 'Compliant',
 		Submission_State_Service::BADGE_LIGHT_GREEN => 'Remediation completed with minor issues',
@@ -46,6 +48,7 @@ class Media_Library_Badge_Column {
 	 * Appends the badge column to the Media Library's column list.
 	 *
 	 * @param array $columns The existing list table columns.
+	 * @return array
 	 */
 	public static function register_column( array $columns ): array {
 		$columns[ self::COLUMN ] = 'ADA Remediation Status';
@@ -58,6 +61,7 @@ class Media_Library_Badge_Column {
 	 *
 	 * @param string $column_name   The column being rendered.
 	 * @param int    $attachment_id The row's attachment ID.
+	 * @return void
 	 */
 	public static function render_column( string $column_name, int $attachment_id ): void {
 		if ( self::COLUMN !== $column_name ) {

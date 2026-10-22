@@ -19,6 +19,8 @@ class Remediation_Log {
 
 	/**
 	 * The log table's fully-prefixed name.
+	 *
+	 * @return string
 	 */
 	public static function table_name(): string {
 		global $wpdb;
@@ -28,6 +30,8 @@ class Remediation_Log {
 
 	/**
 	 * Creates/upgrades the log table if its schema version is out of date.
+	 *
+	 * @return void
 	 */
 	public static function maybe_install(): void {
 		if ( get_option( 'ada_remediation_log_db_version', '' ) === self::DB_VERSION ) {
@@ -40,6 +44,8 @@ class Remediation_Log {
 
 	/**
 	 * Creates/upgrades the log table via dbDelta().
+	 *
+	 * @return void
 	 */
 	public static function install(): void {
 		global $wpdb;
@@ -80,6 +86,7 @@ class Remediation_Log {
 	 * @param string      $badge            The derived badge color for this attempt.
 	 * @param string|null $precheck_json    The precheck verification step's JSON, if any.
 	 * @param string|null $postcheck_json   The postcheck verification step's JSON, if any.
+	 * @return void
 	 */
 	public static function record(
 		int $attachment_id,
@@ -119,6 +126,7 @@ class Remediation_Log {
 	 * @param string $remediation_id   The pipeline's remediation ID, if known.
 	 * @param string $pipeline_version The pipeline version, if known.
 	 * @param string $message          The free-text warning message.
+	 * @return void
 	 */
 	public static function record_warning(
 		int $attachment_id,

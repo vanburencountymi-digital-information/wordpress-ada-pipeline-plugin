@@ -84,6 +84,7 @@ class MediaLibraryBadgeColumnTest extends TestCase
     {
         return [
             'queued (scheduled, not yet submitted)' => ['queued', '#b0c4de', 'Queued for submission'],
+            'retrying (a usage limit was hit)' => ['retrying', '#9370db', "You've hit your pipeline usage limit; will retry automatically"],
             'pending (submitted, pipeline processing)' => ['pending', '#4169e1', 'Remediation in progress'],
             'dark-green (compliant)' => ['dark-green', '#006400', 'Compliant'],
             'light-green (minor)' => ['light-green', '#90ee90', 'Remediation completed with minor issues'],

@@ -22,6 +22,13 @@
 
     <rule ref="WordPress-Extra"/>
 
+    <!-- Every function's doc comment says what it returns, "@return void" included, so a reader
+         never has to open the body to find out. WordPress-Docs excludes this code (core does not
+         require it), so it is switched back on here; the explicit severity is what overrides the exclude. -->
+    <rule ref="Squiz.Commenting.FunctionComment.MissingReturn">
+        <severity>5</severity>
+    </rule>
+
     <!-- Project rule: badge, pipeline and post-meta-key strings are constants, never bare literals. -->
     <rule ref="phpcs-rules/AdaRemediation"/>
 </ruleset>

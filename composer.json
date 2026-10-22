@@ -33,8 +33,14 @@
     },
     "scripts": {
         "test": "phpunit",
-        "lint": "phpcs",
-        "lint:fix": "phpcbf"
+        "lint": [
+            "phpcs",
+            "phpcs --standard=phpcs-tests.xml.dist"
+        ],
+        "lint:fix": [
+            "phpcbf",
+            "phpcbf --standard=phpcs-tests.xml.dist"
+        ]
     },
     "config": {
         "allow-plugins": {

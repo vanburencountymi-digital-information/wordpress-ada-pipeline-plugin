@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<ruleset name="wordpress-ada-pipeline-plugin-tests">
+    <description>Style for the tests. The plugin code (phpcs.xml.dist) uses WordPress tabs; the tests use PSR-12 spaces.</description>
+
+    <file>tests</file>
+
+    <arg value="sp"/>
+    <arg name="colors"/>
+    <arg name="extensions" value="php"/>
+
+    <rule ref="PSR12">
+        <!-- This repo's convention: snake_case test names and Underscored_Class names (PSR-4 maps
+             Retry_PolicyTest to Retry_Policy), which PSR-1 forbids. -->
+        <exclude name="PSR1.Methods.CamelCapsMethodName"/>
+        <exclude name="Squiz.Classes.ValidClassName"/>
+        <!-- Long test names and one-line data sets read better unbroken. -->
+        <exclude name="Generic.Files.LineLength"/>
+    </rule>
+
+    <!-- The bootstrap defines constants and loads files by design. -->
+    <exclude-pattern>tests/bootstrap.php</exclude-pattern>
+</ruleset>
