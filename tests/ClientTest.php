@@ -771,6 +771,190 @@ class ClientTest extends TestCase
         $this->assertConditionsMet();
     }
 
+    /**
+     * @dataProvider rate_limited_responses
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_is_rate_limited_not_failed_and_leaves_the_badge_and_log_alone(
+        array $headers,
+        string $body,
+        ?string $kind,
+        ?int $retry_after
+    ): void {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'headers' => $headers, 'body' => $body]);
+
+        // Nothing may be written: no badge (update_post_meta) and no log row (insert on the shared $wpdb mock).
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+        $GLOBALS['wpdb']->prefix = 'wp_';
+        $GLOBALS['wpdb']->shouldReceive('insert')->never();
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_rate_limited());
+        $this->assertFalse($result->is_failed());
+        $this->assertSame($kind, $result->limit_kind());
+        $this->assertSame($retry_after, $result->retry_after());
+        $this->assertConditionsMet();
+    }
+
+    public function rate_limited_responses(): array
+    {
+        $rate = '{"limit":"rate_limit"}';
+
+        return [
+            'rate limit: the Retry-After header' => [['retry-after' => '120'], $rate, Submit_Result::LIMIT_RATE, 120],
+            'rate limit: a bad header falls back to the body' => [
+                ['retry-after' => 'Wed, 21 Oct 2026 07:28:00 GMT'],
+                '{"limit":"rate_limit","retry_after":300}',
+                Submit_Result::LIMIT_RATE,
+                300,
+            ],
+            'rate limit: no wait given' => [[], $rate, Submit_Result::LIMIT_RATE, null],
+            'rate limit: a huge wait is capped' => [['retry-after' => '99999999999'], $rate, Submit_Result::LIMIT_RATE, Submit_Result::MAX_RETRY_AFTER_SECONDS],
+            'rate limit: a negative body wait is ignored' => [[], '{"limit":"rate_limit","retry_after":-5}', Submit_Result::LIMIT_RATE, null],
+            'rate limit: an unreadable resets_at is ignored' => [[], '{"limit":"rate_limit","resets_at":"soon"}', Submit_Result::LIMIT_RATE, null],
+            'max at once: any wait is ignored' => [
+                ['retry-after' => '60'],
+                '{"limit":"max_at_once","retry_after":60}',
+                Submit_Result::LIMIT_MAX_AT_ONCE,
+                null,
+            ],
+            'unknown limit: any wait is ignored' => [['retry-after' => '60'], '{"limit":"other"}', null, null],
+            'no body at all (a proxy)' => [['retry-after' => '60'], '', null, null],
+            'a body that is not an object' => [[], '"slow down"', null, null],
+        ];
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_submit_attachment_is_false_for_a_429(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post(['response' => ['code' => 429], 'body' => '{"limit":"max_at_once"}']);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $this->assertFalse(Client::submit_attachment(42));
+        $this->assertConditionsMet();
+    }
+
+    /**
+     * @dataProvider resets_at_offsets
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_a_429_resets_at_date_becomes_seconds_from_now(int $offset, int $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $resets_at = gmdate('Y-m-d\TH:i:s\Z', time() + $offset);
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 429],
+            'body' => '{"limit":"rate_limit","resets_at":"' . $resets_at . '"}',
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => 0]);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertEqualsWithDelta($expected, $result->retry_after(), 5);
+    }
+
+    public function resets_at_offsets(): array
+    {
+        return [
+            'ten minutes from now' => [600, 600],
+            'already past: no wait' => [-3600, 0],
+        ];
+    }
+
+    /**
+     * @dataProvider quota_headers
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_ratelimit_headers_are_read_from_a_success_response(array $headers, array $expected): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 201],
+            'headers' => $headers,
+            'body' => self::SUBMIT_RESPONSE_BODY,
+        ]);
+        WP_Mock::userFunction('update_post_meta', ['times' => '1+']);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_submitted());
+        $this->assertSame($expected, $result->quota());
+    }
+
+    /**
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
+     */
+    public function test_the_ratelimit_headers_are_kept_on_a_failed_response_too(): void
+    {
+        $this->define_config_constants();
+        $this->mock_wp_http_helpers();
+        $this->mock_free_pdf();
+        $this->mock_local_pdf_and_post([
+            'response' => ['code' => 500],
+            'headers' => ['x-ratelimit-remaining' => '3'],
+            'body' => 'oops',
+        ]);
+        $this->expect_failure_badge_write(42);
+
+        $result = Client::submit_with_result(42);
+
+        $this->assertTrue($result->is_failed());
+        $this->assertSame([Submit_Result::QUOTA_REMAINING => 3], $result->quota());
+        $this->assertConditionsMet();
+    }
+
+    public function quota_headers(): array
+    {
+        return [
+            'all three' => [
+                ['x-ratelimit-limit' => '100', 'x-ratelimit-remaining' => '0', 'x-ratelimit-reset' => '1792569600'],
+                [
+                    Submit_Result::QUOTA_LIMIT => 100,
+                    Submit_Result::QUOTA_REMAINING => 0,
+                    Submit_Result::QUOTA_RESET => 1792569600,
+                ],
+            ],
+            'only some' => [['x-ratelimit-remaining' => '7'], [Submit_Result::QUOTA_REMAINING => 7]],
+            'not whole numbers are left out' => [
+                ['x-ratelimit-limit' => 'many', 'x-ratelimit-remaining' => '-1', 'x-ratelimit-reset' => '1.5'],
+                [],
+            ],
+            'none' => [[], []],
+        ];
+    }
+
+    /**
+     * Gives the PDF a readable local file and has wp_remote_post() answer with $response.
+     */
+    private function mock_local_pdf_and_post(array $response): void
+    {
+        WP_Mock::userFunction('get_attached_file', ['return' => '/uploads/report.pdf']);
+        WP_Mock::userFunction('AdaRemediationClient\\file_exists', ['return' => true]);
+        WP_Mock::userFunction('AdaRemediationClient\\file_get_contents', ['return' => '%PDF-1.4 local bytes']);
+        WP_Mock::userFunction('rest_url', [
+            'return' => 'https://example.org/wp-json/ada-remediation/v1/callback',
+        ]);
+        WP_Mock::userFunction('wp_remote_post', ['times' => 1, 'return' => $response]);
+    }
+
     private function define_config_constants(): void
     {
         define('ADA_REMEDIATION_API_BASE_URL', 'https://pipeline.example.org');
@@ -806,6 +990,12 @@ class ClientTest extends TestCase
         WP_Mock::userFunction('wp_remote_retrieve_body', [
             'return' => static function ($response) {
                 return $response['body'] ?? '';
+            },
+        ]);
+        // Like core: the value as sent, or '' when the header is missing.
+        WP_Mock::userFunction('wp_remote_retrieve_header', [
+            'return' => static function ($response, string $header) {
+                return $response['headers'][$header] ?? '';
             },
         ]);
     }
